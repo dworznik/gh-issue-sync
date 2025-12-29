@@ -640,6 +640,14 @@ func (c *Client) ListLabels(ctx context.Context) ([]Label, error) {
 	return labels, nil
 }
 
+// CreateLabel creates a new label with the given name and color.
+// Color should be a 6-character hex string without the # prefix.
+func (c *Client) CreateLabel(ctx context.Context, name, color string) error {
+	args := []string{"label", "create", name, "--color", color}
+	_, err := c.runner.Run(ctx, "gh", c.withRepo(args)...)
+	return err
+}
+
 // IssueChange captures the edits we need to apply to an issue.
 type IssueChange struct {
 	Title           *string

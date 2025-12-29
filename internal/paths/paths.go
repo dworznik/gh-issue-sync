@@ -12,6 +12,7 @@ const (
 	OpenDirName      = "open"
 	ClosedDirName    = "closed"
 	ConfigFileName   = "config.json"
+	LabelsFileName   = "labels.json"
 )
 
 type Paths struct {
@@ -22,6 +23,7 @@ type Paths struct {
 	OpenDir      string
 	ClosedDir    string
 	ConfigPath   string
+	LabelsPath   string
 }
 
 func New(root string) Paths {
@@ -31,6 +33,7 @@ func New(root string) Paths {
 	openDir := filepath.Join(issuesDir, OpenDirName)
 	closedDir := filepath.Join(issuesDir, ClosedDirName)
 	configPath := filepath.Join(syncDir, ConfigFileName)
+	labelsPath := filepath.Join(syncDir, LabelsFileName)
 
 	return Paths{
 		Root:         root,
@@ -40,6 +43,7 @@ func New(root string) Paths {
 		OpenDir:      openDir,
 		ClosedDir:    closedDir,
 		ConfigPath:   configPath,
+		LabelsPath:   labelsPath,
 	}
 }
 

@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,6 +65,18 @@ type IssueFile struct {
 	Issue issue.Issue
 	Path  string
 	State string
+}
+
+// LabelCache stores the synced labels from GitHub
+type LabelCache struct {
+	Labels   []LabelEntry `json:"labels"`
+	SyncedAt time.Time    `json:"synced_at"`
+}
+
+// LabelEntry represents a single label with its color
+type LabelEntry struct {
+	Name  string `json:"name"`
+	Color string `json:"color"`
 }
 
 func New(root string, runner ghcli.Runner, out io.Writer, errOut io.Writer) *App {
@@ -293,6 +307,22 @@ func (a *App) Pull(ctx context.Context, opts PullOptions, args []string) error {
 		if err := config.Save(p.ConfigPath, cfg); err != nil {
 			return err
 		}
+
+		// Save labels to cache
+		if len(labelColors) > 0 {
+			labels := make([]LabelEntry, 0, len(labelColors))
+			for name, color := range labelColors {
+				labels = append(labels, LabelEntry{Name: name, Color: color})
+			}
+			// Sort for consistent output
+			sort.Slice(labels, func(i, j int) bool {
+				return strings.ToLower(labels[i].Name) < strings.ToLower(labels[j].Name)
+			})
+			cache := LabelCache{Labels: labels, SyncedAt: now}
+			if err := saveLabelCache(p, cache); err != nil {
+				fmt.Fprintf(a.Err, "%s saving label cache: %v\n", t.WarningText("Warning:"), err)
+			}
+		}
 	}
 
 	if len(conflicts) > 0 {
@@ -398,7 +428,7 @@ func (a *App) fetchLabelColors(ctx context.Context, client *ghcli.Client) map[st
 		return colors
 	}
 	for _, l := range labels {
-		colors[l.Name] = l.Color
+		colors[strings.ToLower(l.Name)] = l.Color
 	}
 	return colors
 }
@@ -420,8 +450,19 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 	client := ghcli.NewClient(a.Runner, repoSlug(cfg))
 	t := a.Theme
 
-	// Fetch label colors for nice output
-	labelColors := a.fetchLabelColors(ctx, client)
+	// Load label cache (or fetch from remote if not cached)
+	labelCache, err := loadLabelCache(p)
+	if err != nil {
+		fmt.Fprintf(a.Err, "%s loading label cache: %v\n", t.WarningText("Warning:"), err)
+	}
+	labelColors := labelCacheToColorMap(labelCache)
+
+	// If no cache, fetch from remote
+	if len(labelColors) == 0 {
+		labelColors = a.fetchLabelColors(ctx, client)
+		// Update cache for future use
+		labelCache = labelsFromColorMap(labelColors, a.Now().UTC())
+	}
 
 	localIssues, err := loadLocalIssues(p)
 	if err != nil {
@@ -430,6 +471,42 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 	filteredIssues, err := filterIssuesByArgs(a.Root, localIssues, args)
 	if err != nil {
 		return err
+	}
+
+	// Collect all labels that will be needed
+	neededLabels := make(map[string]struct{})
+	for _, item := range filteredIssues {
+		for _, label := range item.Issue.Labels {
+			neededLabels[label] = struct{}{}
+		}
+	}
+
+	// Create any missing labels
+	cacheUpdated := false
+	for label := range neededLabels {
+		if _, exists := labelColors[strings.ToLower(label)]; !exists {
+			if opts.DryRun {
+				fmt.Fprintf(a.Out, "%s %s\n", t.MutedText("Would create label"), label)
+				continue
+			}
+			color := randomLabelColor()
+			if err := client.CreateLabel(ctx, label, color); err != nil {
+				fmt.Fprintf(a.Err, "%s creating label %q: %v\n", t.WarningText("Warning:"), label, err)
+				continue
+			}
+			fmt.Fprintf(a.Out, "%s %s\n", t.SuccessText("Created label"), label)
+			labelColors[strings.ToLower(label)] = color
+			labelCache.Labels = append(labelCache.Labels, LabelEntry{Name: label, Color: color})
+			cacheUpdated = true
+		}
+	}
+
+	// Save updated label cache
+	if cacheUpdated && !opts.DryRun {
+		labelCache.SyncedAt = a.Now().UTC()
+		if err := saveLabelCache(p, labelCache); err != nil {
+			fmt.Fprintf(a.Err, "%s saving label cache: %v\n", t.WarningText("Warning:"), err)
+		}
 	}
 
 	mapping := map[string]string{}
@@ -1318,6 +1395,61 @@ func writeOriginalIssue(p paths.Paths, item issue.Issue) error {
 	return issue.WriteFile(path, item)
 }
 
+func loadLabelCache(p paths.Paths) (LabelCache, error) {
+	var cache LabelCache
+	data, err := os.ReadFile(p.LabelsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return cache, nil
+		}
+		return cache, err
+	}
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return cache, err
+	}
+	return cache, nil
+}
+
+func saveLabelCache(p paths.Paths, cache LabelCache) error {
+	data, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(p.LabelsPath, data, 0o644)
+}
+
+// labelCacheToColorMap converts a LabelCache to a map of lowercase name -> color for quick lookups.
+func labelCacheToColorMap(cache LabelCache) map[string]string {
+	m := make(map[string]string, len(cache.Labels))
+	for _, l := range cache.Labels {
+		m[strings.ToLower(l.Name)] = l.Color
+	}
+	return m
+}
+
+// labelsFromColorMap creates a LabelCache from a color map.
+func labelsFromColorMap(colors map[string]string, syncedAt time.Time) LabelCache {
+	labels := make([]LabelEntry, 0, len(colors))
+	for name, color := range colors {
+		labels = append(labels, LabelEntry{Name: name, Color: color})
+	}
+	sort.Slice(labels, func(i, j int) bool {
+		return strings.ToLower(labels[i].Name) < strings.ToLower(labels[j].Name)
+	})
+	return LabelCache{Labels: labels, SyncedAt: syncedAt}
+}
+
+// randomLabelColor returns a random visually pleasing color for labels.
+func randomLabelColor() string {
+	colors := []string{
+		"0052CC", "00875A", "5243AA", "FF5630", "FFAB00",
+		"36B37E", "00B8D9", "6554C0", "FF8B00", "57D9A3",
+		"1D7AFC", "E774BB", "8777D9", "2684FF", "FF991F",
+	}
+	return colors[rand.Intn(len(colors))]
+}
+
 func dirForState(p paths.Paths, state string) string {
 	if state == "closed" {
 		return p.ClosedDir
@@ -1445,7 +1577,8 @@ func (a *App) formatChangeLines(oldIssue, newIssue issue.Issue, labelColors map[
 func labelsToTheme(labels []string, colors map[string]string) []theme.LabelColor {
 	result := make([]theme.LabelColor, 0, len(labels))
 	for _, name := range labels {
-		color := colors[name]
+		// Look up by lowercase for case-insensitive matching
+		color := colors[strings.ToLower(name)]
 		if color == "" {
 			color = "6b7280" // default gray if no color
 		}
