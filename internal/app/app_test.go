@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mitsuhiko/gh-issue-sync/internal/config"
@@ -152,5 +154,119 @@ func TestNewIssueFromEditor(t *testing.T) {
 	}
 	if !parsed.Number.IsLocal() {
 		t.Fatalf("expected local issue number, got %q", parsed.Number)
+	}
+}
+
+func TestOrphanedOriginalsDetection(t *testing.T) {
+	root := t.TempDir()
+	p := paths.New(root)
+	if err := p.EnsureLayout(); err != nil {
+		t.Fatalf("layout: %v", err)
+	}
+
+	// Create originals for issues 1, 2, 3
+	for _, num := range []string{"1", "2", "3"} {
+		iss := issue.Issue{
+			Number: issue.IssueNumber(num),
+			Title:  "Issue " + num,
+			State:  "open",
+		}
+		if err := issue.WriteFile(filepath.Join(p.OriginalsDir, num+".md"), iss); err != nil {
+			t.Fatalf("write original %s: %v", num, err)
+		}
+	}
+
+	// Create local files for issues 1 and 2 only (simulating #3 was deleted)
+	for _, num := range []string{"1", "2"} {
+		iss := issue.Issue{
+			Number: issue.IssueNumber(num),
+			Title:  "Issue " + num,
+			State:  "open",
+		}
+		path := issue.PathFor(p.OpenDir, issue.IssueNumber(num), "Issue "+num)
+		if err := issue.WriteFile(path, iss); err != nil {
+			t.Fatalf("write local %s: %v", num, err)
+		}
+	}
+
+	// Load local issues and build the set of tracked numbers
+	localIssues, err := loadLocalIssues(p)
+	if err != nil {
+		t.Fatalf("load local: %v", err)
+	}
+	localNumbers := make(map[string]struct{}, len(localIssues))
+	for _, item := range localIssues {
+		localNumbers[item.Issue.Number.String()] = struct{}{}
+	}
+
+	// Find orphaned originals
+	entries, err := os.ReadDir(p.OriginalsDir)
+	if err != nil {
+		t.Fatalf("read originals: %v", err)
+	}
+
+	var orphaned []string
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
+			continue
+		}
+		number := strings.TrimSuffix(entry.Name(), ".md")
+		if strings.HasPrefix(number, "T") {
+			continue
+		}
+		if _, exists := localNumbers[number]; !exists {
+			orphaned = append(orphaned, number)
+		}
+	}
+
+	// Should find issue #3 as orphaned
+	if len(orphaned) != 1 {
+		t.Fatalf("expected 1 orphaned issue, got %d: %v", len(orphaned), orphaned)
+	}
+	if orphaned[0] != "3" {
+		t.Fatalf("expected orphaned issue 3, got %s", orphaned[0])
+	}
+}
+
+func TestLocalIssuesNotOrphaned(t *testing.T) {
+	root := t.TempDir()
+	p := paths.New(root)
+	if err := p.EnsureLayout(); err != nil {
+		t.Fatalf("layout: %v", err)
+	}
+
+	// Create an original for a local issue (T-prefixed)
+	localIss := issue.Issue{
+		Number: issue.IssueNumber("Tabc123"),
+		Title:  "Local Issue",
+		State:  "open",
+	}
+	if err := issue.WriteFile(filepath.Join(p.OriginalsDir, "Tabc123.md"), localIss); err != nil {
+		t.Fatalf("write local original: %v", err)
+	}
+
+	// Don't create local file - but since it's T-prefixed, it shouldn't be considered orphaned
+
+	entries, err := os.ReadDir(p.OriginalsDir)
+	if err != nil {
+		t.Fatalf("read originals: %v", err)
+	}
+
+	var orphaned []string
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
+			continue
+		}
+		number := strings.TrimSuffix(entry.Name(), ".md")
+		// Skip local issues (T-prefixed)
+		if strings.HasPrefix(number, "T") {
+			continue
+		}
+		orphaned = append(orphaned, number)
+	}
+
+	// T-prefixed issues should be skipped
+	if len(orphaned) != 0 {
+		t.Fatalf("expected 0 orphaned issues (T-prefix should be skipped), got %d: %v", len(orphaned), orphaned)
 	}
 }

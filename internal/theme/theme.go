@@ -88,7 +88,7 @@ func (t *Theme) DimText(text string) string {
 
 // Status formatting helpers
 
-// FormatStatus formats a status character (A, U, M, D).
+// FormatStatus formats a status character (A, U, M, D, R).
 func (t *Theme) FormatStatus(status string) string {
 	var c termcolor.Color
 	switch status {
@@ -98,6 +98,8 @@ func (t *Theme) FormatStatus(status string) string {
 		c = t.Changed
 	case "D":
 		c = t.Removed
+	case "R":
+		c = t.Changed // Restored
 	default:
 		c = t.Muted
 	}
