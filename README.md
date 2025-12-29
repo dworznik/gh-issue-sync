@@ -30,6 +30,14 @@ create new issues locally, and push changes back to GitHub when ready.
 - [Go 1.21+](https://go.dev/dl/)
 - [GitHub CLI (`gh`)](https://cli.github.com/) installed and authenticated (`gh auth login`)
 
+### Install with Go
+
+```bash
+go install github.com/mitsuhiko/gh-issue-sync/cmd/gh-issue-sync@latest
+```
+
+This installs the binary to `$GOBIN` (or `$GOPATH/bin`). Make sure it's in your `PATH`.
+
 ### Build from source
 
 ```bash
@@ -63,71 +71,25 @@ ls .issues/open/
 
 # Edit an issue
 $EDITOR .issues/open/123-fix-login-bug.md
+gh-issue-sync edit 123
 
 # Push your changes
 gh-issue-sync push
 ```
 
-## Usage
+## Creating Local Issues
 
-### Initialize
+Since the issue numbers come from github you can use temporary issue numbers
+until then.  `T42` or `TABC` are all valid temporary issue IDs.  But they need
+to start with a "T" so that we know they are temporary ones.  After synching
+they are given new numbers and all references are updated.
 
-Set up issue sync in a repository:
+## Sync Behavior
 
-```bash
-# Auto-detect from git remote
-gh-issue-sync init
-
-# Or specify explicitly
-gh-issue-sync init --owner myorg --repo myproject
-```
-
-This creates the `.issues/` directory structure and configuration.
-
-### Pull Issues
-
-Fetch issues from GitHub to local files:
-
-```bash
-# Pull all open issues
-gh-issue-sync pull
-
-# Pull all issues including closed
-gh-issue-sync pull --all
-
-# Pull specific issues by number
-gh-issue-sync pull 123 456
-
-# Filter by label
-gh-issue-sync pull --label bug --label urgent
-
-# Force overwrite local changes
-gh-issue-sync pull --force
-```
-
-**Behavior:**
 - New issues are created in `open/` or `closed/` based on their state
 - Existing issues are updated if unchanged locally
 - Local changes are preserved (conflicts are reported, not overwritten)
 - Original versions are stored in `.sync/originals/` for conflict detection
-
-### Push Changes
-
-Push local changes to GitHub:
-
-```bash
-# Push all changes
-gh-issue-sync push
-
-# Push specific issues
-gh-issue-sync push 123 456
-
-# Preview what would happen
-gh-issue-sync push --dry-run
-```
-
-**Behavior:**
-- Modified issues are updated on GitHub
 - Local-only issues (T1, T2, etc.) are created on GitHub
 - After creation, files are renamed with real issue numbers
 - References like `#T1` in other issues are automatically updated
@@ -138,18 +100,6 @@ See what's changed locally:
 
 ```bash
 gh-issue-sync status
-```
-
-Output:
-```
-Repository: myorg/myproject
-Last full pull: 2025-12-29T17:00:00Z
-
-Modified locally:
-  M .issues/open/123-fix-login-bug.md
-
-New local issues:
-  A .issues/open/T1-new-feature.md
 ```
 
 ### Create New Issues
@@ -189,33 +139,6 @@ gh-issue-sync reopen 456
 Alternatively, move files manually:
 - Move from `open/` to `closed/` to close
 - Move from `closed/` to `open/` to reopen
-
-### View Differences
-
-```bash
-# Diff against last synced version
-gh-issue-sync diff 123
-
-# Diff against current remote state
-gh-issue-sync diff 123 --remote
-```
-
-## Directory Structure
-
-```
-.issues/
-├── .sync/
-│   ├── config.json              # Repository config
-│   └── originals/               # Last-synced versions (for conflict detection)
-│       ├── 123.md
-│       └── 456.md
-├── open/
-│   ├── 123-fix-login-bug.md     # Open issue from GitHub
-│   ├── 456-add-dark-mode.md
-│   └── T1-new-feature.md        # Local-only issue (not yet on GitHub)
-└── closed/
-    └── 100-old-bug.md           # Closed issue
-```
 
 ## Issue File Format
 
@@ -289,88 +212,6 @@ When a conflict occurs:
 - On **pull**: Local changes are preserved, remote update is skipped
 - On **push**: Remote changes are detected, local push is skipped
 - Use `--force` on pull to overwrite local changes
-
-## Example Workflows
-
-### Coding Agent Workflow
-
-```bash
-# Agent fetches current issues
-gh-issue-sync pull
-
-# Agent reads issue to understand the task
-cat .issues/open/123-implement-feature.md
-
-# Agent creates sub-tasks
-gh-issue-sync new "Subtask 1: Database schema"
-gh-issue-sync new "Subtask 2: API endpoints"
-
-# Agent adds details to the issues
-$EDITOR .issues/open/T1-subtask-1-database-schema.md
-
-# Agent pushes all changes
-gh-issue-sync push
-# T1 → #789, T2 → #790 (real issue numbers)
-
-# Agent completes work and closes issue
-gh-issue-sync close 789
-gh-issue-sync push
-```
-
-### Developer Daily Workflow
-
-```bash
-# Morning sync
-gh-issue-sync pull
-
-# Triage: edit labels, assignees, milestones
-$EDITOR .issues/open/456-bug-report.md
-
-# Batch update
-gh-issue-sync push
-
-# Quick issue from idea
-gh-issue-sync new "Refactor auth module" --edit
-
-# Work on it locally, push when ready
-gh-issue-sync push
-```
-
-### Team Collaboration
-
-You can commit `.issues/open/` and `.issues/closed/` to git to share issue
-snapshots with your team. Just don't commit `.issues/.sync/` as it contains
-local state.
-
-Add to `.gitignore`:
-```
-.issues/.sync/
-```
-
-## Configuration
-
-Configuration is stored in `.issues/.sync/config.json`:
-
-```json
-{
-  "repository": {
-    "owner": "myorg",
-    "repo": "myproject"
-  },
-  "local": {
-    "next_local_id": 3
-  },
-  "sync": {
-    "last_full_pull": "2025-12-29T17:00:00Z"
-  }
-}
-```
-
-## Requirements
-
-- **GitHub CLI**: Must be installed and authenticated
-- **Git repository**: The tool auto-detects owner/repo from `git remote`
-- **Write access**: Needed for push operations
 
 ## License
 
