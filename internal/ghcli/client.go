@@ -107,6 +107,221 @@ func (c *Client) ListIssues(ctx context.Context, state string, labels []string) 
 	return issues, nil
 }
 
+// ListIssuesResult contains the result of ListIssuesWithRelationships
+type ListIssuesResult struct {
+	Issues      []issue.Issue
+	LabelColors map[string]string
+}
+
+// ListIssuesWithRelationships fetches issues with their relationships and label colors
+// using GraphQL with pagination. This is much faster than separate calls.
+func (c *Client) ListIssuesWithRelationships(ctx context.Context, state string, labels []string) (ListIssuesResult, error) {
+	owner, repo := splitRepo(c.repo)
+	if owner == "" || repo == "" {
+		return ListIssuesResult{}, fmt.Errorf("invalid repository format")
+	}
+
+	// Map state to GraphQL enum
+	stateFilter := "OPEN"
+	if state == "closed" {
+		stateFilter = "CLOSED"
+	} else if state == "all" {
+		stateFilter = ""
+	}
+
+	// Build label filter
+	labelFilter := ""
+	if len(labels) > 0 {
+		quoted := make([]string, len(labels))
+		for i, l := range labels {
+			quoted[i] = fmt.Sprintf("%q", l)
+		}
+		labelFilter = fmt.Sprintf(", labels: [%s]", strings.Join(quoted, ", "))
+	}
+
+	stateArg := ""
+	if stateFilter != "" {
+		stateArg = fmt.Sprintf(", states: [%s]", stateFilter)
+	}
+
+	result := ListIssuesResult{
+		LabelColors: make(map[string]string),
+	}
+
+	// Paginate through issues, fetching labels on first page
+	var cursor *string
+	firstPage := true
+	for {
+		cursorArg := "null"
+		if cursor != nil {
+			cursorArg = fmt.Sprintf("%q", *cursor)
+		}
+
+		// Include labels query only on first page
+		labelsFragment := ""
+		if firstPage {
+			labelsFragment = `labels(first: 100) {
+      nodes {
+        name
+        color
+      }
+    }`
+		}
+
+		query := fmt.Sprintf(`query($owner: String!, $repo: String!) {
+  repository(owner: $owner, name: $repo) {
+    %s
+    issues(first: 100%s%s, after: %s) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        number
+        title
+        body
+        state
+        stateReason
+        labels(first: 100) { nodes { name } }
+        assignees(first: 100) { nodes { login } }
+        milestone { title }
+        parent { number }
+        blockedBy(first: 100) { nodes { number } }
+        blocking(first: 100) { nodes { number } }
+      }
+    }
+  }
+}`, labelsFragment, stateArg, labelFilter, cursorArg)
+
+		args := []string{"api", "graphql",
+			"-f", fmt.Sprintf("query=%s", query),
+			"-F", fmt.Sprintf("owner=%s", owner),
+			"-F", fmt.Sprintf("repo=%s", repo),
+		}
+
+		out, err := c.runner.Run(ctx, "gh", args...)
+		if err != nil {
+			return ListIssuesResult{}, err
+		}
+
+		var resp struct {
+			Data struct {
+				Repository struct {
+					Labels struct {
+						Nodes []struct {
+							Name  string `json:"name"`
+							Color string `json:"color"`
+						} `json:"nodes"`
+					} `json:"labels"`
+					Issues struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []struct {
+							Number      int     `json:"number"`
+							Title       string  `json:"title"`
+							Body        string  `json:"body"`
+							State       string  `json:"state"`
+							StateReason *string `json:"stateReason"`
+							Labels      struct {
+								Nodes []struct {
+									Name string `json:"name"`
+								} `json:"nodes"`
+							} `json:"labels"`
+							Assignees struct {
+								Nodes []struct {
+									Login string `json:"login"`
+								} `json:"nodes"`
+							} `json:"assignees"`
+							Milestone *struct {
+								Title string `json:"title"`
+							} `json:"milestone"`
+							Parent *struct {
+								Number int `json:"number"`
+							} `json:"parent"`
+							BlockedBy struct {
+								Nodes []struct {
+									Number int `json:"number"`
+								} `json:"nodes"`
+							} `json:"blockedBy"`
+							Blocking struct {
+								Nodes []struct {
+									Number int `json:"number"`
+								} `json:"nodes"`
+							} `json:"blocking"`
+						} `json:"nodes"`
+					} `json:"issues"`
+				} `json:"repository"`
+			} `json:"data"`
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			return ListIssuesResult{}, fmt.Errorf("failed to parse GraphQL response: %w", err)
+		}
+
+		if len(resp.Errors) > 0 {
+			return ListIssuesResult{}, fmt.Errorf("GraphQL error: %s", resp.Errors[0].Message)
+		}
+
+		// Parse labels from first page
+		if firstPage {
+			for _, l := range resp.Data.Repository.Labels.Nodes {
+				result.LabelColors[l.Name] = l.Color
+			}
+			firstPage = false
+		}
+
+		for _, node := range resp.Data.Repository.Issues.Nodes {
+			issLabels := make([]string, 0, len(node.Labels.Nodes))
+			for _, l := range node.Labels.Nodes {
+				issLabels = append(issLabels, l.Name)
+			}
+			assignees := make([]string, 0, len(node.Assignees.Nodes))
+			for _, a := range node.Assignees.Nodes {
+				assignees = append(assignees, a.Login)
+			}
+			milestone := ""
+			if node.Milestone != nil {
+				milestone = node.Milestone.Title
+			}
+
+			iss := issue.Issue{
+				Number:      issue.IssueNumber(strconv.Itoa(node.Number)),
+				Title:       node.Title,
+				Body:        node.Body,
+				State:       strings.ToLower(node.State),
+				StateReason: node.StateReason,
+				Labels:      issLabels,
+				Assignees:   assignees,
+				Milestone:   milestone,
+			}
+
+			if node.Parent != nil {
+				ref := issue.IssueRef(strconv.Itoa(node.Parent.Number))
+				iss.Parent = &ref
+			}
+			for _, b := range node.BlockedBy.Nodes {
+				iss.BlockedBy = append(iss.BlockedBy, issue.IssueRef(strconv.Itoa(b.Number)))
+			}
+			for _, b := range node.Blocking.Nodes {
+				iss.Blocks = append(iss.Blocks, issue.IssueRef(strconv.Itoa(b.Number)))
+			}
+
+			result.Issues = append(result.Issues, iss)
+		}
+
+		if !resp.Data.Repository.Issues.PageInfo.HasNextPage {
+			break
+		}
+		cursor = &resp.Data.Repository.Issues.PageInfo.EndCursor
+	}
+
+	return result, nil
+}
+
 // EnrichWithRelationships fetches parent and blocking relationships for an issue via GraphQL
 // and updates the issue in place.
 func (c *Client) EnrichWithRelationships(ctx context.Context, iss *issue.Issue) error {
@@ -126,6 +341,41 @@ func (c *Client) EnrichWithRelationships(ctx context.Context, iss *issue.Issue) 
 	return nil
 }
 
+// EnrichWithRelationshipsBatch fetches parent and blocking relationships for multiple issues
+// in a single API call and updates each issue in place.
+func (c *Client) EnrichWithRelationshipsBatch(ctx context.Context, issues []issue.Issue) error {
+	// Collect issue numbers for non-local issues
+	var numbers []string
+	for i := range issues {
+		if !issues[i].Number.IsLocal() {
+			numbers = append(numbers, issues[i].Number.String())
+		}
+	}
+
+	if len(numbers) == 0 {
+		return nil
+	}
+
+	// Fetch all relationships in one call
+	rels, err := c.GetIssueRelationshipsBatch(ctx, numbers)
+	if err != nil {
+		// Don't fail if relationships can't be fetched (e.g., feature not available)
+		return nil
+	}
+
+	// Apply relationships to each issue
+	for i := range issues {
+		num := issues[i].Number.String()
+		if rel, ok := rels[num]; ok {
+			issues[i].Parent = rel.Parent
+			issues[i].BlockedBy = rel.BlockedBy
+			issues[i].Blocks = rel.Blocks
+		}
+	}
+
+	return nil
+}
+
 func (c *Client) GetIssue(ctx context.Context, number string) (issue.Issue, error) {
 	args := []string{"issue", "view", number, "--json", "number,title,body,labels,assignees,milestone,state,stateReason"}
 	out, err := c.runner.Run(ctx, "gh", c.withRepo(args)...)
@@ -137,6 +387,165 @@ func (c *Client) GetIssue(ctx context.Context, number string) (issue.Issue, erro
 		return issue.Issue{}, err
 	}
 	return payload.ToIssue(), nil
+}
+
+// GetIssuesBatch fetches multiple issues in a single GraphQL call.
+// Returns a map of issue number -> issue. Issues that don't exist are not included.
+func (c *Client) GetIssuesBatch(ctx context.Context, numbers []string) (map[string]issue.Issue, error) {
+	if len(numbers) == 0 {
+		return map[string]issue.Issue{}, nil
+	}
+
+	owner, repo := splitRepo(c.repo)
+	if owner == "" || repo == "" {
+		return nil, fmt.Errorf("invalid repository format")
+	}
+
+	// Build a batched GraphQL query with aliases for each issue
+	var issueQueries []string
+	for i, num := range numbers {
+		n, err := strconv.Atoi(num)
+		if err != nil {
+			continue
+		}
+		issueQueries = append(issueQueries, fmt.Sprintf(`issue%d: issue(number: %d) {
+      number
+      title
+      body
+      state
+      stateReason
+      labels(first: 100) { nodes { name } }
+      assignees(first: 100) { nodes { login } }
+      milestone { title }
+      parent { number }
+      blockedBy(first: 100) { nodes { number } }
+      blocking(first: 100) { nodes { number } }
+    }`, i, n))
+	}
+
+	if len(issueQueries) == 0 {
+		return map[string]issue.Issue{}, nil
+	}
+
+	query := fmt.Sprintf(`query($owner: String!, $repo: String!) {
+  repository(owner: $owner, name: $repo) {
+    %s
+  }
+}`, strings.Join(issueQueries, "\n    "))
+
+	args := []string{"api", "graphql",
+		"-f", fmt.Sprintf("query=%s", query),
+		"-F", fmt.Sprintf("owner=%s", owner),
+		"-F", fmt.Sprintf("repo=%s", repo),
+	}
+
+	out, err := c.runner.Run(ctx, "gh", args...)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Data struct {
+			Repository map[string]json.RawMessage `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse GraphQL response: %w", err)
+	}
+
+	if len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("GraphQL error: %s", resp.Errors[0].Message)
+	}
+
+	results := make(map[string]issue.Issue)
+
+	for alias, rawIssue := range resp.Data.Repository {
+		if !strings.HasPrefix(alias, "issue") {
+			continue
+		}
+		if string(rawIssue) == "null" {
+			continue
+		}
+
+		var issueData struct {
+			Number      int     `json:"number"`
+			Title       string  `json:"title"`
+			Body        string  `json:"body"`
+			State       string  `json:"state"`
+			StateReason *string `json:"stateReason"`
+			Labels      struct {
+				Nodes []struct {
+					Name string `json:"name"`
+				} `json:"nodes"`
+			} `json:"labels"`
+			Assignees struct {
+				Nodes []struct {
+					Login string `json:"login"`
+				} `json:"nodes"`
+			} `json:"assignees"`
+			Milestone *struct {
+				Title string `json:"title"`
+			} `json:"milestone"`
+			Parent *struct {
+				Number int `json:"number"`
+			} `json:"parent"`
+			BlockedBy struct {
+				Nodes []struct {
+					Number int `json:"number"`
+				} `json:"nodes"`
+			} `json:"blockedBy"`
+			Blocking struct {
+				Nodes []struct {
+					Number int `json:"number"`
+				} `json:"nodes"`
+			} `json:"blocking"`
+		}
+		if err := json.Unmarshal(rawIssue, &issueData); err != nil {
+			continue
+		}
+
+		labels := make([]string, 0, len(issueData.Labels.Nodes))
+		for _, l := range issueData.Labels.Nodes {
+			labels = append(labels, l.Name)
+		}
+		assignees := make([]string, 0, len(issueData.Assignees.Nodes))
+		for _, a := range issueData.Assignees.Nodes {
+			assignees = append(assignees, a.Login)
+		}
+		milestone := ""
+		if issueData.Milestone != nil {
+			milestone = issueData.Milestone.Title
+		}
+
+		iss := issue.Issue{
+			Number:      issue.IssueNumber(strconv.Itoa(issueData.Number)),
+			Title:       issueData.Title,
+			Body:        issueData.Body,
+			State:       strings.ToLower(issueData.State),
+			StateReason: issueData.StateReason,
+			Labels:      labels,
+			Assignees:   assignees,
+			Milestone:   milestone,
+		}
+
+		if issueData.Parent != nil {
+			ref := issue.IssueRef(strconv.Itoa(issueData.Parent.Number))
+			iss.Parent = &ref
+		}
+		for _, b := range issueData.BlockedBy.Nodes {
+			iss.BlockedBy = append(iss.BlockedBy, issue.IssueRef(strconv.Itoa(b.Number)))
+		}
+		for _, b := range issueData.Blocking.Nodes {
+			iss.Blocks = append(iss.Blocks, issue.IssueRef(strconv.Itoa(b.Number)))
+		}
+
+		results[strconv.Itoa(issueData.Number)] = iss
+	}
+
+	return results, nil
 }
 
 func (c *Client) CreateIssue(ctx context.Context, issue issue.Issue) (string, error) {

@@ -59,15 +59,38 @@ type graphqlMutationResponse struct {
 
 // GetIssueRelationships fetches parent and blocking relationships for an issue via GraphQL.
 func (c *Client) GetIssueRelationships(ctx context.Context, number string) (IssueRelationships, string, error) {
-	owner, repo := splitRepo(c.repo)
-	if owner == "" || repo == "" {
-		return IssueRelationships{}, "", fmt.Errorf("invalid repository format")
+	results, err := c.GetIssueRelationshipsBatch(ctx, []string{number})
+	if err != nil {
+		return IssueRelationships{}, "", err
+	}
+	if rel, ok := results[number]; ok {
+		return rel, "", nil // Note: we don't return the ID anymore, but it's not used
+	}
+	return IssueRelationships{}, "", fmt.Errorf("issue %s not found in response", number)
+}
+
+// GetIssueRelationshipsBatch fetches parent and blocking relationships for multiple issues
+// in a single GraphQL call. Returns a map of issue number -> relationships.
+func (c *Client) GetIssueRelationshipsBatch(ctx context.Context, numbers []string) (map[string]IssueRelationships, error) {
+	if len(numbers) == 0 {
+		return map[string]IssueRelationships{}, nil
 	}
 
-	query := `
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    issue(number: $number) {
+	owner, repo := splitRepo(c.repo)
+	if owner == "" || repo == "" {
+		return nil, fmt.Errorf("invalid repository format")
+	}
+
+	// Build a batched GraphQL query with aliases for each issue
+	// GraphQL aliases allow us to fetch multiple issues in one query:
+	// query { repository(owner: "x", name: "y") { issue1: issue(number: 1) { ... } issue2: issue(number: 2) { ... } } }
+	var issueQueries []string
+	for i, num := range numbers {
+		n, err := strconv.Atoi(num)
+		if err != nil {
+			continue // Skip invalid numbers
+		}
+		issueQueries = append(issueQueries, fmt.Sprintf(`issue%d: issue(number: %d) {
       id
       number
       parent {
@@ -86,53 +109,79 @@ query($owner: String!, $repo: String!, $number: Int!) {
           id
         }
       }
-    }
-  }
-}`
-
-	num, err := strconv.Atoi(number)
-	if err != nil {
-		return IssueRelationships{}, "", fmt.Errorf("invalid issue number: %s", number)
+    }`, i, n))
 	}
+
+	if len(issueQueries) == 0 {
+		return map[string]IssueRelationships{}, nil
+	}
+
+	query := fmt.Sprintf(`query($owner: String!, $repo: String!) {
+  repository(owner: $owner, name: $repo) {
+    %s
+  }
+}`, strings.Join(issueQueries, "\n    "))
 
 	args := []string{"api", "graphql",
 		"-f", fmt.Sprintf("query=%s", query),
 		"-F", fmt.Sprintf("owner=%s", owner),
 		"-F", fmt.Sprintf("repo=%s", repo),
-		"-F", fmt.Sprintf("number=%d", num),
 	}
 
 	out, err := c.runner.Run(ctx, "gh", args...)
 	if err != nil {
-		return IssueRelationships{}, "", err
+		return nil, err
 	}
 
-	var resp graphqlResponse
+	// Parse the response - we need a dynamic structure since aliases are dynamic
+	var resp struct {
+		Data struct {
+			Repository map[string]json.RawMessage `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
-		return IssueRelationships{}, "", fmt.Errorf("failed to parse GraphQL response: %w", err)
+		return nil, fmt.Errorf("failed to parse GraphQL response: %w", err)
 	}
 
 	if len(resp.Errors) > 0 {
-		return IssueRelationships{}, "", fmt.Errorf("GraphQL error: %s", resp.Errors[0].Message)
+		return nil, fmt.Errorf("GraphQL error: %s", resp.Errors[0].Message)
 	}
 
-	issueData := resp.Data.Repository.Issue
-	rels := IssueRelationships{}
+	results := make(map[string]IssueRelationships)
 
-	if issueData.Parent != nil {
-		ref := issue.IssueRef(strconv.Itoa(issueData.Parent.Number))
-		rels.Parent = &ref
+	// Parse each aliased issue response
+	for alias, rawIssue := range resp.Data.Repository {
+		if !strings.HasPrefix(alias, "issue") {
+			continue
+		}
+		if string(rawIssue) == "null" {
+			continue
+		}
+
+		var issueData graphqlIssue
+		if err := json.Unmarshal(rawIssue, &issueData); err != nil {
+			continue // Skip malformed issues
+		}
+
+		rels := IssueRelationships{}
+		if issueData.Parent != nil {
+			ref := issue.IssueRef(strconv.Itoa(issueData.Parent.Number))
+			rels.Parent = &ref
+		}
+		for _, node := range issueData.BlockedBy.Nodes {
+			rels.BlockedBy = append(rels.BlockedBy, issue.IssueRef(strconv.Itoa(node.Number)))
+		}
+		for _, node := range issueData.Blocking.Nodes {
+			rels.Blocks = append(rels.Blocks, issue.IssueRef(strconv.Itoa(node.Number)))
+		}
+
+		results[strconv.Itoa(issueData.Number)] = rels
 	}
 
-	for _, node := range issueData.BlockedBy.Nodes {
-		rels.BlockedBy = append(rels.BlockedBy, issue.IssueRef(strconv.Itoa(node.Number)))
-	}
-
-	for _, node := range issueData.Blocking.Nodes {
-		rels.Blocks = append(rels.Blocks, issue.IssueRef(strconv.Itoa(node.Number)))
-	}
-
-	return rels, issueData.ID, nil
+	return results, nil
 }
 
 // GetIssueNodeID fetches the GraphQL node ID for an issue.

@@ -120,16 +120,18 @@ func (a *App) Pull(ctx context.Context, opts PullOptions, args []string) error {
 	client := ghcli.NewClient(a.Runner, repoSlug(cfg))
 	t := a.Theme
 
-	// Fetch label colors for nice output
-	labelColors := a.fetchLabelColors(ctx, client)
-
 	localIssues, err := loadLocalIssues(p)
 	if err != nil {
 		return err
 	}
 
 	var remoteIssues []issue.Issue
+	var labelColors map[string]string
+
 	if len(args) > 0 {
+		// Fetch specific issues by number
+		labelColors = a.fetchLabelColors(ctx, client)
+
 		for _, arg := range args {
 			number := strings.TrimSpace(arg)
 			if number == "" {
@@ -141,49 +143,74 @@ func (a *App) Pull(ctx context.Context, opts PullOptions, args []string) error {
 			}
 			remoteIssues = append(remoteIssues, remote)
 		}
+		// Enrich with relationships
+		if err := client.EnrichWithRelationshipsBatch(ctx, remoteIssues); err != nil {
+			fmt.Fprintf(a.Err, "%s fetching relationships: %v\n", t.WarningText("Warning:"), err)
+		}
 	} else {
 		state := "open"
 		if opts.All {
 			state = "all"
 		}
-		remoteIssues, err = client.ListIssues(ctx, state, opts.Label)
-		if err != nil {
-			return err
+
+		// Collect issue numbers we need to fetch for closed issues
+		var toFetch []string
+		if !opts.All {
+			// We don't know remote issue numbers yet, so we'll collect all local non-local issues
+			// and filter after we get the open issues
+			for _, local := range localIssues {
+				if !local.Issue.Number.IsLocal() {
+					toFetch = append(toFetch, local.Issue.Number.String())
+				}
+			}
 		}
 
-		// When not fetching all issues, also check local open issues that might
-		// have been closed remotely. Build a set of already-fetched issue numbers.
-		if !opts.All {
+		// Run both queries in parallel
+		type listResult struct {
+			result ghcli.ListIssuesResult
+			err    error
+		}
+		type batchResult struct {
+			issues map[string]issue.Issue
+			err    error
+		}
+
+		listCh := make(chan listResult, 1)
+		batchCh := make(chan batchResult, 1)
+
+		go func() {
+			r, e := client.ListIssuesWithRelationships(ctx, state, opts.Label)
+			listCh <- listResult{r, e}
+		}()
+
+		go func() {
+			if len(toFetch) > 0 {
+				r, e := client.GetIssuesBatch(ctx, toFetch)
+				batchCh <- batchResult{r, e}
+			} else {
+				batchCh <- batchResult{nil, nil}
+			}
+		}()
+
+		listRes := <-listCh
+		if listRes.err != nil {
+			return listRes.err
+		}
+		remoteIssues = listRes.result.Issues
+		labelColors = listRes.result.LabelColors
+
+		batchRes := <-batchCh
+		if batchRes.err == nil && len(batchRes.issues) > 0 {
+			// Filter out issues we already have from the open list
 			fetched := make(map[string]struct{}, len(remoteIssues))
 			for _, ri := range remoteIssues {
 				fetched[ri.Number.String()] = struct{}{}
 			}
-			for _, local := range localIssues {
-				// Skip local-only issues (not yet pushed)
-				if local.Issue.Number.IsLocal() {
-					continue
+			for num, iss := range batchRes.issues {
+				if _, ok := fetched[num]; !ok {
+					remoteIssues = append(remoteIssues, iss)
 				}
-				// Skip issues we already fetched
-				if _, ok := fetched[local.Issue.Number.String()]; ok {
-					continue
-				}
-				// Fetch this issue to check if it was closed remotely
-				remote, err := client.GetIssue(ctx, local.Issue.Number.String())
-				if err != nil {
-					// Issue might have been deleted; skip it
-					continue
-				}
-				remoteIssues = append(remoteIssues, remote)
 			}
-		}
-	}
-
-	// Enrich all remote issues with parent/blocking relationships via GraphQL
-	for i := range remoteIssues {
-		if err := client.EnrichWithRelationships(ctx, &remoteIssues[i]); err != nil {
-			// Log but don't fail - relationships are optional
-			fmt.Fprintf(a.Err, "%s fetching relationships for #%s: %v\n",
-				t.WarningText("Warning:"), remoteIssues[i].Number, err)
 		}
 	}
 
