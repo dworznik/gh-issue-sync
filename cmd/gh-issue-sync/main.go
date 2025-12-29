@@ -17,6 +17,7 @@ type Options struct {
 	Init       InitCommand       `command:"init" description:"Initialize issue sync" long-description:"Create the .issues layout and config. If --owner/--repo are omitted, the git remote is used."`
 	Pull       PullCommand       `command:"pull" description:"Pull issues from GitHub" long-description:"Fetch issues from GitHub and write/update local issue files."`
 	Push       PushCommand       `command:"push" description:"Push local changes to GitHub" long-description:"Create or update GitHub issues based on local changes."`
+	Sync       SyncCommand       `command:"sync" description:"Pull and push issues" long-description:"Push local changes first, then pull updates from GitHub."`
 	Status     StatusCommand     `command:"status" description:"Show sync status" long-description:"Show local changes and last full pull time."`
 	New        NewCommand        `command:"new" description:"Create a new local issue" long-description:"Create a new local issue file. Use --edit to open an editor for the initial content."`
 	Edit       EditCommand       `command:"edit" description:"Open an issue in your editor" long-description:"Open an issue file in your preferred editor ($VISUAL, $EDITOR, or git core.editor)."`
@@ -53,6 +54,12 @@ type PushCommand struct {
 	Args   struct {
 		Issues []string `positional-arg-name:"issue" description:"Issue numbers, local IDs, or paths to push"`
 	} `positional-args:"yes"`
+}
+
+type SyncCommand struct {
+	BaseCommand
+	All   bool     `long:"all" description:"Pull all issues (including closed)"`
+	Label []string `long:"label" value-name:"LABEL" description:"Filter by label (repeatable)"`
 }
 
 type StatusCommand struct {
@@ -122,6 +129,10 @@ func (c *PushCommand) Usage() string {
 	return "[OPTIONS]"
 }
 
+func (c *SyncCommand) Usage() string {
+	return "[OPTIONS]"
+}
+
 func (c *StatusCommand) Usage() string {
 	return "[OPTIONS]"
 }
@@ -172,6 +183,14 @@ func (c *PushCommand) Execute(args []string) error {
 		return c.App.Push(context.Background(), opts, c.Args.Issues)
 	}
 	return c.App.Push(context.Background(), opts, args)
+}
+
+func (c *SyncCommand) Execute(_ []string) error {
+	ctx := context.Background()
+	if err := c.App.Push(ctx, app.PushOptions{}, nil); err != nil {
+		return err
+	}
+	return c.App.Pull(ctx, app.PullOptions{All: c.All, Force: true, Label: c.Label}, nil)
 }
 
 func (c *StatusCommand) Execute(_ []string) error {
@@ -275,6 +294,7 @@ func main() {
 	opts.Init.App = application
 	opts.Pull.App = application
 	opts.Push.App = application
+	opts.Sync.App = application
 	opts.Status.App = application
 	opts.New.App = application
 	opts.Edit.App = application

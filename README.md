@@ -75,6 +75,9 @@ gh-issue-sync edit 123
 
 # Push your changes
 gh-issue-sync push
+
+# Or sync both ways (push then pull)
+gh-issue-sync sync
 ```
 
 ## Creating Local Issues
@@ -83,6 +86,21 @@ Since the issue numbers come from github you can use temporary issue numbers
 until then.  `T42` or `TABC` are all valid temporary issue IDs.  But they need
 to start with a "T" so that we know they are temporary ones.  After synching
 they are given new numbers and all references are updated.
+
+### Sync Both Ways
+
+Push and pull in a single command:
+
+```bash
+# Push local changes, then pull remote updates
+gh-issue-sync sync
+
+# Include closed issues
+gh-issue-sync sync --all
+
+# Filter by label
+gh-issue-sync sync --label bug
+```
 
 ## Sync Behavior
 
