@@ -8,18 +8,13 @@ import (
 )
 
 type Config struct {
-	Repository RepoConfig  `json:"repository"`
-	Local      LocalConfig `json:"local"`
-	Sync       SyncConfig  `json:"sync,omitempty"`
+	Repository RepoConfig `json:"repository"`
+	Sync       SyncConfig `json:"sync,omitempty"`
 }
 
 type RepoConfig struct {
 	Owner string `json:"owner"`
 	Repo  string `json:"repo"`
-}
-
-type LocalConfig struct {
-	NextLocalID int `json:"next_local_id"`
 }
 
 type SyncConfig struct {
@@ -29,7 +24,6 @@ type SyncConfig struct {
 func Default(owner, repo string) Config {
 	return Config{
 		Repository: RepoConfig{Owner: owner, Repo: repo},
-		Local:      LocalConfig{NextLocalID: 1},
 	}
 }
 

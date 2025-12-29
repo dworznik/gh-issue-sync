@@ -16,6 +16,8 @@ import (
 	"github.com/mitsuhiko/gh-issue-sync/internal/config"
 	"github.com/mitsuhiko/gh-issue-sync/internal/ghcli"
 	"github.com/mitsuhiko/gh-issue-sync/internal/issue"
+	"github.com/mitsuhiko/gh-issue-sync/internal/localid"
+	"github.com/mitsuhiko/gh-issue-sync/internal/lock"
 	"github.com/mitsuhiko/gh-issue-sync/internal/paths"
 	"github.com/mitsuhiko/gh-issue-sync/internal/theme"
 )
@@ -107,6 +109,14 @@ func (a *App) Pull(ctx context.Context, opts PullOptions, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Acquire lock
+	lck, err := lock.Acquire(p.SyncDir, lock.DefaultTimeout)
+	if err != nil {
+		return err
+	}
+	defer lck.Release()
+
 	client := ghcli.NewClient(a.Runner, repoSlug(cfg))
 	t := a.Theme
 
@@ -274,6 +284,14 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Acquire lock
+	lck, err := lock.Acquire(p.SyncDir, lock.DefaultTimeout)
+	if err != nil {
+		return err
+	}
+	defer lck.Release()
+
 	client := ghcli.NewClient(a.Runner, repoSlug(cfg))
 	t := a.Theme
 
@@ -495,8 +513,7 @@ func (a *App) Status(ctx context.Context) error {
 
 func (a *App) NewIssue(ctx context.Context, title string, opts NewOptions) error {
 	p := paths.New(a.Root)
-	cfg, err := loadConfig(p.ConfigPath)
-	if err != nil {
+	if _, err := loadConfig(p.ConfigPath); err != nil {
 		return err
 	}
 
@@ -504,10 +521,20 @@ func (a *App) NewIssue(ctx context.Context, title string, opts NewOptions) error
 		return fmt.Errorf("title is required (provide a title or use --edit)")
 	}
 
-	id := cfg.Local.NextLocalID
-	cfg.Local.NextLocalID++
+	// Acquire lock
+	lck, err := lock.Acquire(p.SyncDir, lock.DefaultTimeout)
+	if err != nil {
+		return err
+	}
+	defer lck.Release()
 
-	localNumber := issue.IssueNumber(fmt.Sprintf("T%d", id))
+	// Generate a random local ID
+	id, err := localid.Generate()
+	if err != nil {
+		return fmt.Errorf("failed to generate local ID: %w", err)
+	}
+
+	localNumber := issue.IssueNumber(fmt.Sprintf("T%s", id))
 	var newIssue issue.Issue
 	if strings.TrimSpace(title) == "" && opts.Edit {
 		edited, err := issueFromEditor(ctx, localNumber, opts.Labels)
@@ -534,9 +561,6 @@ func (a *App) NewIssue(ctx context.Context, title string, opts NewOptions) error
 
 	path := issue.PathFor(p.OpenDir, localNumber, newIssue.Title)
 	if err := issue.WriteFile(path, newIssue); err != nil {
-		return err
-	}
-	if err := config.Save(p.ConfigPath, cfg); err != nil {
 		return err
 	}
 	if opts.Edit && strings.TrimSpace(title) != "" {
@@ -622,6 +646,14 @@ func finalizeEditedIssue(path string, number issue.IssueNumber) (string, error) 
 
 func (a *App) Close(ctx context.Context, number string, opts CloseOptions) error {
 	p := paths.New(a.Root)
+
+	// Acquire lock
+	lck, err := lock.Acquire(p.SyncDir, lock.DefaultTimeout)
+	if err != nil {
+		return err
+	}
+	defer lck.Release()
+
 	file, err := findIssueByNumber(p, number)
 	if err != nil {
 		return err
@@ -649,6 +681,14 @@ func (a *App) Close(ctx context.Context, number string, opts CloseOptions) error
 
 func (a *App) Reopen(ctx context.Context, number string) error {
 	p := paths.New(a.Root)
+
+	// Acquire lock
+	lck, err := lock.Acquire(p.SyncDir, lock.DefaultTimeout)
+	if err != nil {
+		return err
+	}
+	defer lck.Release()
+
 	file, err := findIssueByNumber(p, number)
 	if err != nil {
 		return err
@@ -1177,10 +1217,13 @@ func diffStringSet(old, new []string) ([]string, []string) {
 	return add, remove
 }
 
-var localRefPattern = regexp.MustCompile(`(?m)#(T\d+)`)
+// localRefPattern matches local issue references like #T1, #T42, #Tabc123 (T followed by alphanumerics)
+var localRefPattern = regexp.MustCompile(`#(T[a-zA-Z0-9]+)`)
 
 func applyMapping(issueItem *issue.Issue, mapping map[string]string) bool {
 	changed := false
+
+	// Apply mapping to body
 	body := localRefPattern.ReplaceAllStringFunc(issueItem.Body, func(match string) string {
 		id := strings.TrimPrefix(match, "#")
 		if real, ok := mapping[id]; ok {
@@ -1189,8 +1232,23 @@ func applyMapping(issueItem *issue.Issue, mapping map[string]string) bool {
 		}
 		return match
 	})
-	if changed {
+	if body != issueItem.Body {
 		issueItem.Body = body
+		changed = true
+	}
+
+	// Apply mapping to title
+	title := localRefPattern.ReplaceAllStringFunc(issueItem.Title, func(match string) string {
+		id := strings.TrimPrefix(match, "#")
+		if real, ok := mapping[id]; ok {
+			changed = true
+			return "#" + real
+		}
+		return match
+	})
+	if title != issueItem.Title {
+		issueItem.Title = title
+		changed = true
 	}
 
 	if issueItem.Parent != nil {
