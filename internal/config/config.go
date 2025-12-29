@@ -1,31 +1,29 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
-
-	"github.com/pelletier/go-toml/v2"
 )
 
 type Config struct {
-	Repository RepoConfig  `toml:"repository"`
-	Local      LocalConfig `toml:"local"`
-	Sync       SyncConfig  `toml:"sync"`
+	Repository RepoConfig  `json:"repository"`
+	Local      LocalConfig `json:"local"`
+	Sync       SyncConfig  `json:"sync,omitempty"`
 }
 
 type RepoConfig struct {
-	Owner string `toml:"owner"`
-	Repo  string `toml:"repo"`
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
 }
 
 type LocalConfig struct {
-	NextLocalID int `toml:"next_local_id"`
+	NextLocalID int `json:"next_local_id"`
 }
 
 type SyncConfig struct {
-	LastFullPull *time.Time `toml:"last_full_pull"`
+	LastFullPull *time.Time `json:"last_full_pull,omitempty"`
 }
 
 func Default(owner, repo string) Config {
@@ -41,57 +39,17 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if err := toml.Unmarshal(data, &cfg); err == nil {
-		return cfg, nil
-	} else if !strings.Contains(err.Error(), "last_full_pull") && !strings.Contains(err.Error(), "LastFullPull") {
-		return cfg, err
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("failed to parse config: %w", err)
 	}
-
-	legacy, err := loadLegacyConfig(data)
-	if err != nil {
-		return cfg, err
-	}
-	return legacy, nil
+	return cfg, nil
 }
 
 func Save(path string, cfg Config) error {
-	data, err := toml.Marshal(cfg)
+	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
+	data = append(data, '\n')
 	return os.WriteFile(path, data, 0o644)
-}
-
-type legacySyncConfig struct {
-	LastFullPull *string `toml:"last_full_pull"`
-}
-
-type legacyConfig struct {
-	Repository RepoConfig       `toml:"repository"`
-	Local      LocalConfig      `toml:"local"`
-	Sync       legacySyncConfig `toml:"sync"`
-}
-
-func loadLegacyConfig(data []byte) (Config, error) {
-	var legacy legacyConfig
-	if err := toml.Unmarshal(data, &legacy); err != nil {
-		return Config{}, err
-	}
-	cfg := Config{
-		Repository: legacy.Repository,
-		Local:      legacy.Local,
-	}
-	if legacy.Sync.LastFullPull == nil {
-		return cfg, nil
-	}
-	raw := strings.TrimSpace(*legacy.Sync.LastFullPull)
-	if raw == "" {
-		return cfg, nil
-	}
-	parsed, err := time.Parse(time.RFC3339Nano, raw)
-	if err != nil {
-		return Config{}, fmt.Errorf("invalid last_full_pull %q: %w", raw, err)
-	}
-	cfg.Sync.LastFullPull = &parsed
-	return cfg, nil
 }

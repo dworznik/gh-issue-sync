@@ -11,7 +11,7 @@ const (
 	OriginalsDirName = "originals"
 	OpenDirName      = "open"
 	ClosedDirName    = "closed"
-	ConfigFileName   = "config.toml"
+	ConfigFileName   = "config.json"
 )
 
 type Paths struct {
