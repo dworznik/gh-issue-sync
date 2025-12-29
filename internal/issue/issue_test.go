@@ -8,8 +8,8 @@ import (
 
 func TestParseRenderRoundTrip(t *testing.T) {
 	syncedAt := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	// Note: number is derived from filename, not frontmatter
 	input := strings.TrimSpace(`---
-number: 123
 title: "Test issue"
 labels:
   - bug
@@ -29,8 +29,9 @@ Body line
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if parsed.Number != "123" {
-		t.Fatalf("expected number 123, got %s", parsed.Number)
+	// Number is empty when using Parse directly (use ParseFile to get number from path)
+	if parsed.Number != "" {
+		t.Fatalf("expected empty number from Parse, got %s", parsed.Number)
 	}
 	if parsed.Title != "Test issue" {
 		t.Fatalf("expected title, got %q", parsed.Title)
@@ -49,6 +50,37 @@ Body line
 	}
 	if !EqualIgnoringSyncedAt(parsed, parsedAgain) {
 		t.Fatalf("round-trip mismatch")
+	}
+}
+
+func TestParseFileExtractsNumber(t *testing.T) {
+	// Mock file read
+	oldReadFile := osReadFile
+	defer func() { osReadFile = oldReadFile }()
+
+	osReadFile = func(path string) ([]byte, error) {
+		return []byte(`---
+title: Test
+state: open
+---
+Body
+`), nil
+	}
+
+	issue, err := ParseFile("/tmp/.issues/open/42-test-issue.md")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+	if issue.Number != "42" {
+		t.Fatalf("expected number 42, got %s", issue.Number)
+	}
+
+	issue, err = ParseFile("/tmp/.issues/open/T5-new-issue.md")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+	if issue.Number != "T5" {
+		t.Fatalf("expected number T5, got %s", issue.Number)
 	}
 }
 

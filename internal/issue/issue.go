@@ -35,7 +35,6 @@ type Issue struct {
 }
 
 type FrontMatter struct {
-	Number      IssueNumber `yaml:"number"`
 	Title       string      `yaml:"title"`
 	Labels      []string    `yaml:"labels,omitempty"`
 	Assignees   []string    `yaml:"assignees,omitempty"`
@@ -54,32 +53,6 @@ func (n IssueNumber) String() string {
 
 func (n IssueNumber) IsLocal() bool {
 	return strings.HasPrefix(string(n), "T")
-}
-
-func (n *IssueNumber) UnmarshalYAML(value *yaml.Node) error {
-	if value.Kind != yaml.ScalarNode {
-		return fmt.Errorf("issue number must be scalar")
-	}
-	if value.Tag == "!!int" {
-		*n = IssueNumber(value.Value)
-		return nil
-	}
-	*n = IssueNumber(value.Value)
-	return nil
-}
-
-func (n IssueNumber) MarshalYAML() (interface{}, error) {
-	if n == "" {
-		return nil, nil
-	}
-	if n.IsLocal() {
-		return string(n), nil
-	}
-	parsed, err := strconv.Atoi(string(n))
-	if err != nil {
-		return string(n), nil
-	}
-	return parsed, nil
 }
 
 func (r IssueRef) String() string {
@@ -114,12 +87,30 @@ func (r IssueRef) MarshalYAML() (interface{}, error) {
 
 var frontMatterDelimiter = []byte("---")
 
+// numberFromFilename extracts the issue number from a filename like "42-title.md" or "T5-title.md"
+// Also handles simple filenames like "42.md" (used for originals)
+func numberFromFilename(path string) IssueNumber {
+	base := filepath.Base(path)
+	base = strings.TrimSuffix(base, ".md")
+	idx := strings.Index(base, "-")
+	if idx == -1 {
+		// No dash - entire base is the number (e.g., "42.md")
+		return IssueNumber(base)
+	}
+	return IssueNumber(base[:idx])
+}
+
 func ParseFile(path string) (Issue, error) {
 	data, err := osReadFile(path)
 	if err != nil {
 		return Issue{}, err
 	}
-	return Parse(data)
+	issue, err := Parse(data)
+	if err != nil {
+		return Issue{}, err
+	}
+	issue.Number = numberFromFilename(path)
+	return issue, nil
 }
 
 func Parse(data []byte) (Issue, error) {
@@ -132,7 +123,6 @@ func Parse(data []byte) (Issue, error) {
 		return Issue{}, err
 	}
 	issue := Issue{
-		Number:      fm.Number,
 		Title:       fm.Title,
 		Labels:      fm.Labels,
 		Assignees:   fm.Assignees,
@@ -150,7 +140,6 @@ func Parse(data []byte) (Issue, error) {
 
 func Render(issue Issue) (string, error) {
 	fm := FrontMatter{
-		Number:      issue.Number,
 		Title:       issue.Title,
 		Labels:      sortedStrings(issue.Labels),
 		Assignees:   sortedStrings(issue.Assignees),
