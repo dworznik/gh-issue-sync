@@ -207,6 +207,17 @@ func Normalize(issue Issue) Issue {
 }
 
 func EqualIgnoringSyncedAt(a, b Issue) bool {
+	return equalIssues(a, b, false)
+}
+
+// EqualForConflictCheck compares issues ignoring SyncedAt and StateReason.
+// StateReason is ignored because GitHub can set it automatically when closing
+// issues, which would cause false conflicts.
+func EqualForConflictCheck(a, b Issue) bool {
+	return equalIssues(a, b, true)
+}
+
+func equalIssues(a, b Issue, ignoreStateReason bool) bool {
 	a = Normalize(a)
 	b = Normalize(b)
 	a.SyncedAt = nil
@@ -230,7 +241,7 @@ func EqualIgnoringSyncedAt(a, b Issue) bool {
 	if a.State != b.State {
 		return false
 	}
-	if normalizeOptional(a.StateReason) != normalizeOptional(b.StateReason) {
+	if !ignoreStateReason && normalizeOptional(a.StateReason) != normalizeOptional(b.StateReason) {
 		return false
 	}
 	if normalizeOptionalRef(a.Parent) != normalizeOptionalRef(b.Parent) {

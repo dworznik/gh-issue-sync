@@ -47,6 +47,10 @@ type CloseOptions struct {
 	Reason string
 }
 
+type DiffOptions struct {
+	Remote bool
+}
+
 type IssueFile struct {
 	Issue issue.Issue
 	Path  string
@@ -342,7 +346,7 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 		if err != nil {
 			return err
 		}
-		if hasOriginal && !issue.EqualIgnoringSyncedAt(remote, original) {
+		if hasOriginal && !issue.EqualForConflictCheck(remote, original) {
 			conflicts = append(conflicts, item.Issue.Number.String())
 			continue
 		}
@@ -631,6 +635,183 @@ func (a *App) Reopen(ctx context.Context, number string) error {
 		return err
 	}
 	return nil
+}
+
+func (a *App) Diff(ctx context.Context, number string, opts DiffOptions) error {
+	p := paths.New(a.Root)
+	cfg, err := loadConfig(p.ConfigPath)
+	if err != nil {
+		return err
+	}
+	t := a.Theme
+
+	file, err := findIssueByNumber(p, number)
+	if err != nil {
+		return err
+	}
+	local := file.Issue
+
+	var base issue.Issue
+	var baseLabel string
+
+	if opts.Remote {
+		if local.Number.IsLocal() {
+			return fmt.Errorf("cannot diff local issue %s against remote (not yet pushed)", local.Number)
+		}
+		client := ghcli.NewClient(a.Runner, repoSlug(cfg))
+		remote, err := client.GetIssue(ctx, local.Number.String())
+		if err != nil {
+			return err
+		}
+		base = remote
+		baseLabel = "remote"
+	} else {
+		original, hasOriginal := readOriginalIssue(p, local.Number.String())
+		if !hasOriginal {
+			if local.Number.IsLocal() {
+				return fmt.Errorf("local issue %s has no original (not yet pushed)", local.Number)
+			}
+			return fmt.Errorf("no original found for issue %s (try pulling first)", local.Number)
+		}
+		base = original
+		baseLabel = "original"
+	}
+
+	// Normalize for comparison
+	base = issue.Normalize(base)
+	local = issue.Normalize(local)
+
+	// Check if there are any differences
+	if issue.EqualIgnoringSyncedAt(base, local) {
+		fmt.Fprintf(a.Out, "%s\n", t.MutedText(fmt.Sprintf("No differences between local and %s", baseLabel)))
+		return nil
+	}
+
+	// Print header
+	fmt.Fprintf(a.Out, "%s %s %s\n\n",
+		t.Bold("Diff for"),
+		t.AccentText("#"+local.Number.String()),
+		t.MutedText(fmt.Sprintf("(local vs %s)", baseLabel)))
+
+	// Diff metadata fields
+	if base.Title != local.Title {
+		fmt.Fprintln(a.Out, t.FormatChange("title", fmt.Sprintf("%q", base.Title), fmt.Sprintf("%q", local.Title)))
+	}
+	if base.State != local.State {
+		fmt.Fprintln(a.Out, t.FormatChange("state", base.State, local.State))
+	}
+	if normalizeOptional(base.StateReason) != normalizeOptional(local.StateReason) {
+		fmt.Fprintln(a.Out, t.FormatChange("state_reason", formatOptionalStringPtr(base.StateReason), formatOptionalStringPtr(local.StateReason)))
+	}
+	if !stringSlicesEqual(base.Labels, local.Labels) {
+		fmt.Fprintln(a.Out, t.FormatChange("labels", formatStringList(base.Labels), formatStringList(local.Labels)))
+	}
+	if !stringSlicesEqual(base.Assignees, local.Assignees) {
+		fmt.Fprintln(a.Out, t.FormatChange("assignees", formatStringList(base.Assignees), formatStringList(local.Assignees)))
+	}
+	if base.Milestone != local.Milestone {
+		fmt.Fprintln(a.Out, t.FormatChange("milestone", formatOptionalString(base.Milestone), formatOptionalString(local.Milestone)))
+	}
+
+	// Diff body with unified diff format
+	if base.Body != local.Body {
+		fmt.Fprintln(a.Out)
+		fmt.Fprintln(a.Out, t.Bold("Body:"))
+		a.printUnifiedDiff(base.Body, local.Body, baseLabel, "local")
+	}
+
+	return nil
+}
+
+func (a *App) printUnifiedDiff(oldText, newText, oldLabel, newLabel string) {
+	t := a.Theme
+
+	oldLines := splitLines(oldText)
+	newLines := splitLines(newText)
+
+	// Simple line-by-line diff using LCS
+	ops := computeDiff(oldLines, newLines)
+
+	fmt.Fprintf(a.Out, "%s\n", t.MutedText(fmt.Sprintf("--- %s", oldLabel)))
+	fmt.Fprintf(a.Out, "%s\n", t.MutedText(fmt.Sprintf("+++ %s", newLabel)))
+
+	for _, op := range ops {
+		switch op.Type {
+		case diffEqual:
+			fmt.Fprintf(a.Out, " %s\n", op.Text)
+		case diffDelete:
+			fmt.Fprintf(a.Out, "%s%s\n", t.Fg(t.Removed, "-"), t.Fg(t.OldValue, op.Text))
+		case diffInsert:
+			fmt.Fprintf(a.Out, "%s%s\n", t.Fg(t.Added, "+"), t.Fg(t.NewValue, op.Text))
+		}
+	}
+}
+
+type diffOpType int
+
+const (
+	diffEqual diffOpType = iota
+	diffDelete
+	diffInsert
+)
+
+type diffOp struct {
+	Type diffOpType
+	Text string
+}
+
+func splitLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	text = strings.TrimSuffix(text, "\n")
+	return strings.Split(text, "\n")
+}
+
+// computeDiff computes a simple line-based diff using the LCS algorithm
+func computeDiff(oldLines, newLines []string) []diffOp {
+	// Build LCS table
+	m, n := len(oldLines), len(newLines)
+	lcs := make([][]int, m+1)
+	for i := range lcs {
+		lcs[i] = make([]int, n+1)
+	}
+
+	for i := 1; i <= m; i++ {
+		for j := 1; j <= n; j++ {
+			if oldLines[i-1] == newLines[j-1] {
+				lcs[i][j] = lcs[i-1][j-1] + 1
+			} else if lcs[i-1][j] >= lcs[i][j-1] {
+				lcs[i][j] = lcs[i-1][j]
+			} else {
+				lcs[i][j] = lcs[i][j-1]
+			}
+		}
+	}
+
+	// Backtrack to build diff
+	var ops []diffOp
+	i, j := m, n
+	for i > 0 || j > 0 {
+		if i > 0 && j > 0 && oldLines[i-1] == newLines[j-1] {
+			ops = append(ops, diffOp{Type: diffEqual, Text: oldLines[i-1]})
+			i--
+			j--
+		} else if j > 0 && (i == 0 || lcs[i][j-1] >= lcs[i-1][j]) {
+			ops = append(ops, diffOp{Type: diffInsert, Text: newLines[j-1]})
+			j--
+		} else {
+			ops = append(ops, diffOp{Type: diffDelete, Text: oldLines[i-1]})
+			i--
+		}
+	}
+
+	// Reverse to get correct order
+	for left, right := 0, len(ops)-1; left < right; left, right = left+1, right-1 {
+		ops[left], ops[right] = ops[right], ops[left]
+	}
+
+	return ops
 }
 
 func loadLocalIssues(p paths.Paths) ([]IssueFile, error) {

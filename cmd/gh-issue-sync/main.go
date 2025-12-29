@@ -19,6 +19,7 @@ type Options struct {
 	New    NewCommand    `command:"new" description:"Create a new local issue" long-description:"Create a new local issue file. Use --edit to open an editor for the initial content."`
 	Close  CloseCommand  `command:"close" description:"Mark an issue for closing" long-description:"Mark an issue as closed locally (use push to sync)." `
 	Reopen ReopenCommand `command:"reopen" description:"Reopen a closed issue" long-description:"Mark an issue as open locally (use push to sync)."`
+	Diff   DiffCommand   `command:"diff" description:"Show diff between local and original/remote" long-description:"Show what changed in a local issue compared to the last synced version or current remote state."`
 }
 
 type BaseCommand struct {
@@ -77,6 +78,14 @@ type ReopenCommand struct {
 	} `positional-args:"yes"`
 }
 
+type DiffCommand struct {
+	BaseCommand
+	Remote bool `long:"remote" description:"Diff against current remote state instead of last synced original"`
+	Args   struct {
+		Number string `positional-arg-name:"issue" description:"Issue number or local ID" required:"yes"`
+	} `positional-args:"yes"`
+}
+
 func (c *InitCommand) Usage() string {
 	return "[OPTIONS]"
 }
@@ -103,6 +112,10 @@ func (c *CloseCommand) Usage() string {
 
 func (c *ReopenCommand) Usage() string {
 	return "[OPTIONS]"
+}
+
+func (c *DiffCommand) Usage() string {
+	return "[OPTIONS] <issue>"
 }
 
 func (c *InitCommand) Execute(_ []string) error {
@@ -159,6 +172,17 @@ func (c *ReopenCommand) Execute(args []string) error {
 	return c.App.Reopen(context.Background(), number)
 }
 
+func (c *DiffCommand) Execute(args []string) error {
+	number := c.Args.Number
+	if number == "" && len(args) > 0 {
+		number = args[0]
+	}
+	if strings.TrimSpace(number) == "" {
+		return fmt.Errorf("issue number is required")
+	}
+	return c.App.Diff(context.Background(), number, app.DiffOptions{Remote: c.Remote})
+}
+
 func main() {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -173,6 +197,7 @@ func main() {
 	opts.New.App = application
 	opts.Close.App = application
 	opts.Reopen.App = application
+	opts.Diff.App = application
 
 	parser := flags.NewParser(&opts, flags.HelpFlag|flags.PassDoubleDash)
 	parser.ShortDescription = "Sync GitHub issues to local Markdown files."
