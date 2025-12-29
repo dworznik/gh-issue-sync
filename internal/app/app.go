@@ -113,6 +113,11 @@ func (a *App) Pull(ctx context.Context, opts PullOptions, args []string) error {
 	// Fetch label colors for nice output
 	labelColors := a.fetchLabelColors(ctx, client)
 
+	localIssues, err := loadLocalIssues(p)
+	if err != nil {
+		return err
+	}
+
 	var remoteIssues []issue.Issue
 	if len(args) > 0 {
 		for _, arg := range args {
@@ -135,9 +140,35 @@ func (a *App) Pull(ctx context.Context, opts PullOptions, args []string) error {
 		if err != nil {
 			return err
 		}
+
+		// When not fetching all issues, also check local open issues that might
+		// have been closed remotely. Build a set of already-fetched issue numbers.
+		if !opts.All {
+			fetched := make(map[string]struct{}, len(remoteIssues))
+			for _, ri := range remoteIssues {
+				fetched[ri.Number.String()] = struct{}{}
+			}
+			for _, local := range localIssues {
+				// Skip local-only issues (not yet pushed)
+				if local.Issue.Number.IsLocal() {
+					continue
+				}
+				// Skip issues we already fetched
+				if _, ok := fetched[local.Issue.Number.String()]; ok {
+					continue
+				}
+				// Fetch this issue to check if it was closed remotely
+				remote, err := client.GetIssue(ctx, local.Issue.Number.String())
+				if err != nil {
+					// Issue might have been deleted; skip it
+					continue
+				}
+				remoteIssues = append(remoteIssues, remote)
+			}
+		}
 	}
 
-	localIssues, err := loadLocalIssues(p)
+	localIssues, err = loadLocalIssues(p)
 	if err != nil {
 		return err
 	}
