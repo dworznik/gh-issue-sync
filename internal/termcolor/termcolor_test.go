@@ -1,6 +1,7 @@
 package termcolor
 
 import (
+	"os"
 	"testing"
 )
 
@@ -113,4 +114,100 @@ func TestColorHex(t *testing.T) {
 	if c.Hex() != "#ff8040" {
 		t.Errorf("Hex() = %q, want #ff8040", c.Hex())
 	}
+}
+
+func TestStylerNoColor(t *testing.T) {
+	s := NewStyler(ColorModeNone)
+	red := Color{255, 0, 0}
+
+	// All styling methods should return plain text
+	if s.Fg(red, "test") != "test" {
+		t.Errorf("Fg with ColorModeNone should return plain text")
+	}
+	if s.Bg(red, "test") != "test" {
+		t.Errorf("Bg with ColorModeNone should return plain text")
+	}
+	if s.FgBg(red, red, "test") != "test" {
+		t.Errorf("FgBg with ColorModeNone should return plain text")
+	}
+	if s.Bold("test") != "test" {
+		t.Errorf("Bold with ColorModeNone should return plain text")
+	}
+	if s.Dim("test") != "test" {
+		t.Errorf("Dim with ColorModeNone should return plain text")
+	}
+	if s.Italic("test") != "test" {
+		t.Errorf("Italic with ColorModeNone should return plain text")
+	}
+	if s.Underline("test") != "test" {
+		t.Errorf("Underline with ColorModeNone should return plain text")
+	}
+	if s.Strikethrough("test") != "test" {
+		t.Errorf("Strikethrough with ColorModeNone should return plain text")
+	}
+	if s.FgStrikethrough(red, "test") != "test" {
+		t.Errorf("FgStrikethrough with ColorModeNone should return plain text")
+	}
+	if s.FgUnderline(red, "test") != "test" {
+		t.Errorf("FgUnderline with ColorModeNone should return plain text")
+	}
+	if s.Reset() != "" {
+		t.Errorf("Reset with ColorModeNone should return empty string")
+	}
+	if s.FgHex("#ff0000", "test") != "test" {
+		t.Errorf("FgHex with ColorModeNone should return plain text")
+	}
+	if s.BgHex("#ff0000", "test") != "test" {
+		t.Errorf("BgHex with ColorModeNone should return plain text")
+	}
+}
+
+func TestDetectColorModeNoColor(t *testing.T) {
+	// Save original env
+	origNoColor, hadNoColor := os.LookupEnv("NO_COLOR")
+	origForceColor := os.Getenv("FORCE_COLOR")
+	defer func() {
+		if hadNoColor {
+			os.Setenv("NO_COLOR", origNoColor)
+		} else {
+			os.Unsetenv("NO_COLOR")
+		}
+		if origForceColor != "" {
+			os.Setenv("FORCE_COLOR", origForceColor)
+		} else {
+			os.Unsetenv("FORCE_COLOR")
+		}
+	}()
+
+	// Test NO_COLOR with empty value
+	os.Setenv("NO_COLOR", "")
+	os.Unsetenv("FORCE_COLOR")
+	if DetectColorMode() != ColorModeNone {
+		t.Errorf("NO_COLOR='' should return ColorModeNone")
+	}
+
+	// Test NO_COLOR with any value
+	os.Setenv("NO_COLOR", "1")
+	if DetectColorMode() != ColorModeNone {
+		t.Errorf("NO_COLOR=1 should return ColorModeNone")
+	}
+
+	// Test NO_COLOR takes precedence over FORCE_COLOR
+	os.Setenv("FORCE_COLOR", "1")
+	if DetectColorMode() != ColorModeNone {
+		t.Errorf("NO_COLOR should take precedence over FORCE_COLOR")
+	}
+
+	// Test FORCE_COLOR without NO_COLOR
+	os.Unsetenv("NO_COLOR")
+	os.Setenv("FORCE_COLOR", "1")
+	mode := DetectColorMode()
+	if mode == ColorModeNone {
+		t.Errorf("FORCE_COLOR=1 should not return ColorModeNone")
+	}
+
+	// Test FORCE_COLOR=0 is ignored
+	os.Setenv("FORCE_COLOR", "0")
+	// This should fall through to normal detection, not force colors
+	// The result depends on environment, but shouldn't be forced
 }

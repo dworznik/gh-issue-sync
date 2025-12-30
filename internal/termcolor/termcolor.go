@@ -13,8 +13,10 @@ import (
 type ColorMode int
 
 const (
+	// ColorModeNone disables all color output.
+	ColorModeNone ColorMode = iota
 	// ColorModeBasic is 16-color mode (not really used, we fall back to 256).
-	ColorModeBasic ColorMode = iota
+	ColorModeBasic
 	// ColorMode256 is 256-color mode (xterm-256color).
 	ColorMode256
 	// ColorModeTruecolor is 24-bit RGB mode.
@@ -56,6 +58,21 @@ func init() {
 
 // DetectColorMode returns the terminal's color capability based on environment.
 func DetectColorMode() ColorMode {
+	// NO_COLOR takes precedence (https://no-color.org/)
+	// Any value (including empty) means disable colors
+	if _, exists := os.LookupEnv("NO_COLOR"); exists {
+		return ColorModeNone
+	}
+
+	// FORCE_COLOR enables colors even when not a TTY
+	// Check this before other detection to allow forcing in non-interactive contexts
+	forceColor := os.Getenv("FORCE_COLOR")
+	if forceColor != "" && forceColor != "0" {
+		// FORCE_COLOR=1 or FORCE_COLOR=true means enable colors
+		// Try to detect the best mode available
+		return detectColorCapability()
+	}
+
 	// Check COLORTERM first (most reliable)
 	colorterm := os.Getenv("COLORTERM")
 	if colorterm == "truecolor" || colorterm == "24bit" {
@@ -86,6 +103,28 @@ func DetectColorMode() ColorMode {
 	}
 
 	// Default to 256 colors (most terminals support this)
+	return ColorMode256
+}
+
+// detectColorCapability detects the best color mode without checking NO_COLOR/FORCE_COLOR.
+func detectColorCapability() ColorMode {
+	colorterm := os.Getenv("COLORTERM")
+	if colorterm == "truecolor" || colorterm == "24bit" {
+		return ColorModeTruecolor
+	}
+	if os.Getenv("WT_SESSION") != "" {
+		return ColorModeTruecolor
+	}
+	if os.Getenv("TERM_PROGRAM") == "iTerm.app" {
+		return ColorModeTruecolor
+	}
+	if os.Getenv("TERM_PROGRAM") == "vscode" {
+		return ColorModeTruecolor
+	}
+	term := os.Getenv("TERM")
+	if strings.Contains(term, "256color") || strings.Contains(term, "truecolor") {
+		return ColorMode256
+	}
 	return ColorMode256
 }
 
@@ -236,6 +275,9 @@ func DefaultStyler() *Styler {
 
 // fgAnsi returns the ANSI escape sequence for a foreground color.
 func (s *Styler) fgAnsi(c Color) string {
+	if s.mode == ColorModeNone {
+		return ""
+	}
 	if s.mode == ColorModeTruecolor {
 		return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", c.R, c.G, c.B)
 	}
@@ -244,6 +286,9 @@ func (s *Styler) fgAnsi(c Color) string {
 
 // bgAnsi returns the ANSI escape sequence for a background color.
 func (s *Styler) bgAnsi(c Color) string {
+	if s.mode == ColorModeNone {
+		return ""
+	}
 	if s.mode == ColorModeTruecolor {
 		return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", c.R, c.G, c.B)
 	}
@@ -252,16 +297,25 @@ func (s *Styler) bgAnsi(c Color) string {
 
 // Fg returns text with the given foreground color.
 func (s *Styler) Fg(c Color, text string) string {
+	if s.mode == ColorModeNone {
+		return text
+	}
 	return s.fgAnsi(c) + text + fgReset
 }
 
 // Bg returns text with the given background color.
 func (s *Styler) Bg(c Color, text string) string {
+	if s.mode == ColorModeNone {
+		return text
+	}
 	return s.bgAnsi(c) + text + bgReset
 }
 
 // FgBg returns text with both foreground and background colors.
 func (s *Styler) FgBg(fg, bg Color, text string) string {
+	if s.mode == ColorModeNone {
+		return text
+	}
 	return s.fgAnsi(fg) + s.bgAnsi(bg) + text + reset
 }
 
@@ -285,41 +339,65 @@ func (s *Styler) BgHex(hex string, text string) string {
 
 // Bold returns text with bold styling.
 func (s *Styler) Bold(text string) string {
+	if s.mode == ColorModeNone {
+		return text
+	}
 	return bold + text + boldOff
 }
 
 // Dim returns text with dim styling.
 func (s *Styler) Dim(text string) string {
+	if s.mode == ColorModeNone {
+		return text
+	}
 	return dim + text + boldOff
 }
 
 // Italic returns text with italic styling.
 func (s *Styler) Italic(text string) string {
+	if s.mode == ColorModeNone {
+		return text
+	}
 	return italic + text + italicOff
 }
 
 // Underline returns text with underline styling.
 func (s *Styler) Underline(text string) string {
+	if s.mode == ColorModeNone {
+		return text
+	}
 	return underline + text + underlineOff
 }
 
 // Strikethrough returns text with strikethrough styling.
 func (s *Styler) Strikethrough(text string) string {
+	if s.mode == ColorModeNone {
+		return text
+	}
 	return strikethrough + text + strikeOff
 }
 
 // FgStrikethrough returns text with foreground color and strikethrough.
 func (s *Styler) FgStrikethrough(c Color, text string) string {
+	if s.mode == ColorModeNone {
+		return text
+	}
 	return s.fgAnsi(c) + strikethrough + text + strikeOff + fgReset
 }
 
 // FgUnderline returns text with foreground color and underline.
 func (s *Styler) FgUnderline(c Color, text string) string {
+	if s.mode == ColorModeNone {
+		return text
+	}
 	return s.fgAnsi(c) + underline + text + underlineOff + fgReset
 }
 
 // Reset returns the ANSI reset sequence.
 func (s *Styler) Reset() string {
+	if s.mode == ColorModeNone {
+		return ""
+	}
 	return reset
 }
 
