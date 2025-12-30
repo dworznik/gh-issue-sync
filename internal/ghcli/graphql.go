@@ -316,7 +316,7 @@ mutation($parentId: ID!, $childId: ID!) {
 // removeParent removes the parent relationship from an issue.
 func (c *Client) removeParent(ctx context.Context, issueNumber string) error {
 	// First, get the current parent
-	rels, childNodeID, err := c.GetIssueRelationships(ctx, issueNumber)
+	rels, _, err := c.GetIssueRelationships(ctx, issueNumber)
 	if err != nil {
 		return fmt.Errorf("failed to get issue relationships: %w", err)
 	}
@@ -324,6 +324,11 @@ func (c *Client) removeParent(ctx context.Context, issueNumber string) error {
 	if rels.Parent == nil {
 		// No parent to remove
 		return nil
+	}
+
+	childNodeID, err := c.GetIssueNodeID(ctx, issueNumber)
+	if err != nil {
+		return fmt.Errorf("failed to get child issue node ID: %w", err)
 	}
 
 	parentNodeID, err := c.GetIssueNodeID(ctx, rels.Parent.String())
