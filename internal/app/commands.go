@@ -81,7 +81,30 @@ func (a *App) Status(ctx context.Context) error {
 		for _, path := range stateChanges {
 			fmt.Fprintf(a.Out, "  %s %s\n", t.AccentText("->"), relPath(a.Root, path))
 		}
+		fmt.Fprintln(a.Out)
 	}
+
+	// Check if projects are used and warn about missing scope
+	projectsUsed := false
+	for _, item := range localIssues {
+		if len(item.Issue.Projects) > 0 {
+			projectsUsed = true
+			break
+		}
+	}
+	if !projectsUsed {
+		// Check if projects.json has entries
+		if cache, err := loadProjectCache(p); err == nil && len(cache.Projects) > 0 {
+			projectsUsed = true
+		}
+	}
+	if projectsUsed {
+		client := ghcli.NewClient(a.Runner, repoSlug(cfg))
+		if hasScope, err := client.HasProjectScope(ctx); err == nil && !hasScope {
+			fmt.Fprintf(a.Err, "%s %v\n", t.WarningText("Warning:"), ghcli.ErrMissingProjectScope)
+		}
+	}
+
 	return nil
 }
 

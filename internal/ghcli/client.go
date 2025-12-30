@@ -3,6 +3,7 @@ package ghcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -10,6 +11,9 @@ import (
 
 	"github.com/mitsuhiko/gh-issue-sync/internal/issue"
 )
+
+// ErrMissingProjectScope is returned when the token lacks project scope
+var ErrMissingProjectScope = errors.New("missing 'project' scope - run 'gh auth refresh -s project' to enable")
 
 type Client struct {
 	runner   Runner
@@ -44,6 +48,27 @@ func (c *Client) reportProgress(event ProgressEvent) {
 	if c.progress != nil {
 		c.progress(event)
 	}
+}
+
+// HasProjectScope checks if the current GitHub token has the 'project' scope.
+func (c *Client) HasProjectScope(ctx context.Context) (bool, error) {
+	// Make a simple API call and check the X-Oauth-Scopes header
+	out, err := c.runner.Run(ctx, "gh", "api", "user", "-i")
+	if err != nil {
+		return false, err
+	}
+
+	// Parse headers from the response
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(strings.ToLower(line), "x-oauth-scopes:") {
+			scopes := strings.ToLower(line[len("x-oauth-scopes:"):])
+			// Check for 'project' scope (which implies read:project)
+			return strings.Contains(scopes, "project"), nil
+		}
+	}
+
+	return false, nil
 }
 
 func (c *Client) withRepo(args []string) []string {
@@ -1039,10 +1064,10 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 		return nil, nil
 	}
 
-	// Check for scope errors - return empty list gracefully
+	// Check for scope errors
 	for _, e := range resp.Errors {
 		if e.Type == "INSUFFICIENT_SCOPES" {
-			return nil, nil
+			return nil, ErrMissingProjectScope
 		}
 	}
 
@@ -1105,10 +1130,10 @@ func (c *Client) listUserProjects(ctx context.Context, login string) ([]Project,
 		return nil, nil
 	}
 
-	// Check for scope errors - return empty list gracefully
+	// Check for scope errors
 	for _, e := range resp.Errors {
 		if e.Type == "INSUFFICIENT_SCOPES" {
-			return nil, nil
+			return nil, ErrMissingProjectScope
 		}
 	}
 

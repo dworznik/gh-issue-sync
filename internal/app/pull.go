@@ -299,7 +299,19 @@ func (a *App) Pull(ctx context.Context, opts PullOptions, args []string) error {
 
 		projectsRes := <-projectsCh
 		if projectsRes.err != nil {
-			// Don't warn - scope might not be available
+			if errors.Is(projectsRes.err, ghcli.ErrMissingProjectScope) {
+				// Check if any local issues use projects
+				hasProjects := false
+				for _, item := range localIssues {
+					if len(item.Issue.Projects) > 0 {
+						hasProjects = true
+						break
+					}
+				}
+				if hasProjects {
+					fmt.Fprintf(a.Err, "%s %v\n", t.WarningText("Warning:"), projectsRes.err)
+				}
+			}
 		} else if len(projectsRes.items) > 0 {
 			entries := make([]ProjectEntry, 0, len(projectsRes.items))
 			for _, proj := range projectsRes.items {
