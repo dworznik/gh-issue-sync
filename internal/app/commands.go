@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/google/shlex"
 	"github.com/mitsuhiko/gh-issue-sync/internal/ghcli"
 	"github.com/mitsuhiko/gh-issue-sync/internal/issue"
 	"github.com/mitsuhiko/gh-issue-sync/internal/localid"
@@ -1016,10 +1017,14 @@ func runEditor(ctx context.Context, editor string, path string) error {
 }
 
 // runInteractiveCommand runs a command with stdin/stdout/stderr connected to the terminal.
-// The command string may contain arguments (e.g., "code --wait").
+// The command string may contain arguments (e.g., "code --wait") and supports shell-style
+// quoting for paths with spaces (e.g., '"/Applications/My Editor.app/Contents/MacOS/editor" --wait').
 var runInteractiveCommand = func(ctx context.Context, command string, args ...string) error {
-	// Split the command to handle editors with arguments like "code --wait"
-	parts := strings.Fields(command)
+	// Use shlex to properly parse shell-style quoting
+	parts, err := shlex.Split(command)
+	if err != nil {
+		return fmt.Errorf("failed to parse command %q: %w", command, err)
+	}
 	if len(parts) == 0 {
 		return fmt.Errorf("empty command")
 	}
