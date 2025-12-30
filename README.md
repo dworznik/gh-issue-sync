@@ -160,6 +160,32 @@ gh-issue-sync sync --label bug
 - After creation, files are renamed with real issue numbers
 - References like `#T1` in other issues are automatically updated
 
+### List Issues
+
+List and filter local issues:
+
+```bash
+# List open issues
+gh-issue-sync list
+
+# Include closed issues
+gh-issue-sync list --all
+
+# Filter by label, assignee, author, milestone
+gh-issue-sync list --label bug --assignee alice
+
+# GitHub-style search query
+gh-issue-sync list --search "error no:assignee sort:created-asc"
+```
+
+The `--search` flag supports GitHub issue search syntax:
+- `is:open`, `is:closed` – Filter by state
+- `label:NAME` – Filter by label
+- `no:label`, `no:assignee`, `no:milestone` – Filter by missing field
+- `assignee:USER`, `author:USER`, `milestone:NAME` – Filter by field
+- `sort:created-asc`, `sort:created-desc` – Sort results
+- Free text – Search in title and body (case-insensitive)
+
 ### Check Status
 
 See what's changed locally:

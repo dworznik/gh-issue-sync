@@ -412,6 +412,133 @@ func TestList(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines with --limit 2, got %d: %s", len(lines), output)
 	}
+
+	// Test: search with free text
+	out.Reset()
+	if err := application.List(context.Background(), ListOptions{All: true, Search: "bug"}); err != nil {
+		t.Fatalf("list --search bug: %v", err)
+	}
+	output = out.String()
+	if !strings.Contains(output, "#1") || !strings.Contains(output, "#3") {
+		t.Fatalf("issues with 'bug' in title should be in output: %s", output)
+	}
+	if strings.Contains(output, "#2") {
+		t.Fatalf("'Feature' issue should not be in --search bug: %s", output)
+	}
+
+	// Test: search case insensitive
+	out.Reset()
+	if err := application.List(context.Background(), ListOptions{All: true, Search: "BUG"}); err != nil {
+		t.Fatalf("list --search BUG: %v", err)
+	}
+	output = out.String()
+	if !strings.Contains(output, "#1") {
+		t.Fatalf("case insensitive search should find 'Bug': %s", output)
+	}
+
+	// Test: search with is:open
+	out.Reset()
+	if err := application.List(context.Background(), ListOptions{Search: "is:open"}); err != nil {
+		t.Fatalf("list --search is:open: %v", err)
+	}
+	output = out.String()
+	if !strings.Contains(output, "#1") || !strings.Contains(output, "#2") {
+		t.Fatalf("open issues should be in output: %s", output)
+	}
+	if strings.Contains(output, "#3") {
+		t.Fatalf("closed issue #3 should not be in --search is:open: %s", output)
+	}
+
+	// Test: search with is:closed
+	out.Reset()
+	if err := application.List(context.Background(), ListOptions{All: true, Search: "is:closed"}); err != nil {
+		t.Fatalf("list --search is:closed: %v", err)
+	}
+	output = out.String()
+	if !strings.Contains(output, "#3") {
+		t.Fatalf("closed issue #3 should be in --search is:closed: %s", output)
+	}
+	if strings.Contains(output, "#1") {
+		t.Fatalf("open issue #1 should not be in --search is:closed: %s", output)
+	}
+
+	// Test: search with label:
+	out.Reset()
+	if err := application.List(context.Background(), ListOptions{All: true, Search: "label:bug"}); err != nil {
+		t.Fatalf("list --search label:bug: %v", err)
+	}
+	output = out.String()
+	if !strings.Contains(output, "#1") || !strings.Contains(output, "#3") {
+		t.Fatalf("bug-labeled issues should be in output: %s", output)
+	}
+	if strings.Contains(output, "#2") {
+		t.Fatalf("enhancement issue should not be in --search label:bug: %s", output)
+	}
+
+	// Test: search with no:assignee
+	out.Reset()
+	if err := application.List(context.Background(), ListOptions{All: true, Search: "no:assignee"}); err != nil {
+		t.Fatalf("list --search no:assignee: %v", err)
+	}
+	output = out.String()
+	if !strings.Contains(output, "#2") || !strings.Contains(output, "#3") {
+		t.Fatalf("unassigned issues should be in output: %s", output)
+	}
+	if strings.Contains(output, "#1") {
+		t.Fatalf("assigned issue #1 should not be in --search no:assignee: %s", output)
+	}
+
+	// Test: search with combined query
+	out.Reset()
+	if err := application.List(context.Background(), ListOptions{All: true, Search: "bug label:bug no:assignee"}); err != nil {
+		t.Fatalf("list --search combined: %v", err)
+	}
+	output = out.String()
+	if !strings.Contains(output, "#3") {
+		t.Fatalf("closed bug without assignee should be in output: %s", output)
+	}
+	if strings.Contains(output, "#1") {
+		t.Fatalf("assigned bug #1 should not be in combined search: %s", output)
+	}
+
+	// Test: search with author:
+	out.Reset()
+	if err := application.List(context.Background(), ListOptions{All: true, Search: "author:bob"}); err != nil {
+		t.Fatalf("list --search author:bob: %v", err)
+	}
+	output = out.String()
+	if !strings.Contains(output, "#1") || !strings.Contains(output, "#3") {
+		t.Fatalf("bob's issues should be in output: %s", output)
+	}
+	if strings.Contains(output, "#2") {
+		t.Fatalf("alice's issue should not be in --search author:bob: %s", output)
+	}
+
+	// Test: search with milestone:
+	out.Reset()
+	if err := application.List(context.Background(), ListOptions{All: true, Search: "milestone:v1.0"}); err != nil {
+		t.Fatalf("list --search milestone:v1.0: %v", err)
+	}
+	output = out.String()
+	if !strings.Contains(output, "#1") || !strings.Contains(output, "#3") {
+		t.Fatalf("v1.0 issues should be in output: %s", output)
+	}
+	if strings.Contains(output, "#2") {
+		t.Fatalf("issue without milestone should not be in --search milestone:v1.0: %s", output)
+	}
+
+	// Test: search with mentions:
+	out.Reset()
+	if err := application.List(context.Background(), ListOptions{Search: "mentions:charlie"}); err != nil {
+		t.Fatalf("list --search mentions:charlie: %v", err)
+	}
+	output = out.String()
+	if !strings.Contains(output, "#1") {
+		t.Fatalf("issue mentioning charlie should be in output: %s", output)
+	}
+	if strings.Contains(output, "#2") {
+		t.Fatalf("issue not mentioning charlie should not be in output: %s", output)
+	}
 }
 
 func TestLocalIssuesNotOrphaned(t *testing.T) {

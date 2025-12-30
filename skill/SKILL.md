@@ -13,6 +13,7 @@ Syncs GitHub issues to local Markdown files in `.issues/open/` and `.issues/clos
 gh-issue-sync init              # Initialize in git repo
 gh-issue-sync pull              # Fetch open issues (--all for closed too)
 gh-issue-sync push              # Push local changes (--dry-run to preview)
+gh-issue-sync list              # List issues (supports gh issue list flags + --search)
 gh-issue-sync new "Title"       # Create issue (--label, --edit)
 gh-issue-sync close 42          # Close (--reason completed|not_planned)
 gh-issue-sync reopen 42

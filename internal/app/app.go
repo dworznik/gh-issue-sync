@@ -62,6 +62,7 @@ type ListOptions struct {
 	Limit     int
 	Local     bool
 	Modified  bool
+	Search    string
 }
 
 func New(root string, runner ghcli.Runner, out io.Writer, errOut io.Writer) *App {

@@ -16,6 +16,7 @@ import (
 	"github.com/mitsuhiko/gh-issue-sync/internal/localid"
 	"github.com/mitsuhiko/gh-issue-sync/internal/lock"
 	"github.com/mitsuhiko/gh-issue-sync/internal/paths"
+	"github.com/mitsuhiko/gh-issue-sync/internal/search"
 )
 
 func (a *App) Status(ctx context.Context) error {
@@ -166,14 +167,26 @@ func (a *App) List(ctx context.Context, opts ListOptions) error {
 	}
 	localIssues := result.Issues
 
+	// Parse search query if provided
+	var searchQuery *search.Query
+	if opts.Search != "" {
+		q := search.Parse(opts.Search)
+		searchQuery = &q
+	}
+
 	// Apply filters
 	var filtered []IssueFile
 	for _, item := range localIssues {
-		// State filter
+		// State filter from opts (takes precedence)
 		if opts.State != "" && item.State != opts.State {
 			continue
 		}
-		if !opts.All && opts.State == "" && item.State != "open" {
+		// State filter from search query
+		if searchQuery != nil && searchQuery.State != "" && !strings.EqualFold(item.State, searchQuery.State) {
+			continue
+		}
+		// Default to open if neither --all nor explicit state
+		if !opts.All && opts.State == "" && (searchQuery == nil || searchQuery.State == "") && item.State != "open" {
 			continue
 		}
 
@@ -194,7 +207,7 @@ func (a *App) List(ctx context.Context, opts ListOptions) error {
 			}
 		}
 
-		// Label filter
+		// Label filter from opts
 		if len(opts.Label) > 0 {
 			hasLabel := false
 			for _, wantLabel := range opts.Label {
@@ -213,7 +226,7 @@ func (a *App) List(ctx context.Context, opts ListOptions) error {
 			}
 		}
 
-		// Assignee filter
+		// Assignee filter from opts
 		if opts.Assignee != "" {
 			hasAssignee := false
 			for _, assignee := range item.Issue.Assignees {
@@ -227,21 +240,21 @@ func (a *App) List(ctx context.Context, opts ListOptions) error {
 			}
 		}
 
-		// Author filter
+		// Author filter from opts
 		if opts.Author != "" {
 			if !strings.EqualFold(opts.Author, item.Issue.Author) {
 				continue
 			}
 		}
 
-		// Milestone filter
+		// Milestone filter from opts
 		if opts.Milestone != "" {
 			if !strings.EqualFold(opts.Milestone, item.Issue.Milestone) {
 				continue
 			}
 		}
 
-		// Mention filter (searches for @username in body)
+		// Mention filter from opts
 		if opts.Mention != "" {
 			mention := "@" + opts.Mention
 			if !strings.Contains(strings.ToLower(item.Issue.Body), strings.ToLower(mention)) {
@@ -249,18 +262,75 @@ func (a *App) List(ctx context.Context, opts ListOptions) error {
 			}
 		}
 
+		// Apply search query filters
+		if searchQuery != nil {
+			var syncedAt *int64
+			if item.Issue.SyncedAt != nil {
+				ts := item.Issue.SyncedAt.Unix()
+				syncedAt = &ts
+			}
+			issueData := search.IssueData{
+				Number:    item.Issue.Number,
+				Title:     item.Issue.Title,
+				Body:      item.Issue.Body,
+				State:     item.State,
+				Labels:    item.Issue.Labels,
+				Assignees: item.Issue.Assignees,
+				Author:    item.Issue.Author,
+				Milestone: item.Issue.Milestone,
+				IssueType: item.Issue.IssueType,
+				Projects:  item.Issue.Projects,
+				SyncedAt:  syncedAt,
+			}
+			// Skip state check in Match since we already handled it above
+			queryForMatch := *searchQuery
+			queryForMatch.State = ""
+			if !queryForMatch.Match(issueData) {
+				continue
+			}
+		}
+
 		filtered = append(filtered, item)
 	}
 
-	// Sort: remote issues first (by number), then local issues
-	sort.Slice(filtered, func(i, j int) bool {
-		iLocal := filtered[i].Issue.Number.IsLocal()
-		jLocal := filtered[j].Issue.Number.IsLocal()
-		if iLocal != jLocal {
-			return !iLocal // Remote issues first
+	// Sort based on search query or default
+	if searchQuery != nil && (searchQuery.SortField != "created" || searchQuery.SortAsc) {
+		// Convert to IssueData for sorting
+		issueDataList := make([]search.IssueData, len(filtered))
+		for i, item := range filtered {
+			var syncedAt *int64
+			if item.Issue.SyncedAt != nil {
+				ts := item.Issue.SyncedAt.Unix()
+				syncedAt = &ts
+			}
+			issueDataList[i] = search.IssueData{
+				Number:   item.Issue.Number,
+				SyncedAt: syncedAt,
+			}
 		}
-		return filtered[i].Issue.Number.String() < filtered[j].Issue.Number.String()
-	})
+		searchQuery.Sort(issueDataList)
+
+		// Reorder filtered based on sorted issueDataList
+		numberToIndex := make(map[string]int)
+		for i, item := range filtered {
+			numberToIndex[item.Issue.Number.String()] = i
+		}
+		sortedFiltered := make([]IssueFile, len(filtered))
+		for i, data := range issueDataList {
+			sortedFiltered[i] = filtered[numberToIndex[data.Number.String()]]
+		}
+		filtered = sortedFiltered
+	} else {
+		// Default sort: remote issues first (by number), then local issues
+		sort.Slice(filtered, func(i, j int) bool {
+			iLocal := filtered[i].Issue.Number.IsLocal()
+			jLocal := filtered[j].Issue.Number.IsLocal()
+			if iLocal != jLocal {
+				return !iLocal // Remote issues first
+			}
+			return filtered[i].Issue.Number.String() < filtered[j].Issue.Number.String()
+		})
+	}
 
 	// Apply limit
 	if opts.Limit > 0 && len(filtered) > opts.Limit {

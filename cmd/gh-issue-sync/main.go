@@ -80,6 +80,7 @@ type ListCommand struct {
 	Limit     int      `long:"limit" short:"L" value-name:"N" description:"Maximum number of issues to show"`
 	Local     bool     `long:"local" description:"Show only local (unpushed) issues"`
 	Modified  bool     `long:"modified" short:"m" description:"Show only modified issues"`
+	Search    string   `long:"search" short:"S" value-name:"QUERY" description:"Search with GitHub-style query (e.g. 'error no:assignee sort:created-asc')"`
 }
 
 type NewCommand struct {
@@ -231,6 +232,7 @@ func (c *ListCommand) Execute(_ []string) error {
 		Limit:     c.Limit,
 		Local:     c.Local,
 		Modified:  c.Modified,
+		Search:    c.Search,
 	}
 	return c.App.List(context.Background(), opts)
 }
