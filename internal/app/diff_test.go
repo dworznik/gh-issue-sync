@@ -133,3 +133,49 @@ func TestFormatInlineWordDiff(t *testing.T) {
 	// The result should contain "foo" unchanged and show the change from "bar" to "bar!"
 	t.Logf("Result: %s", result)
 }
+
+func TestSplitIntoTokens(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{"hello world", []string{"hello", "world"}},
+		{"hello\nworld", []string{"hello", "\n", "world"}},
+		{"a\n\nb", []string{"a", "\n", "\n", "b"}},
+		{"  hello  \n  world  ", []string{"hello", "\n", "world"}},
+		{"line1\nline2\nline3", []string{"line1", "\n", "line2", "\n", "line3"}},
+	}
+
+	for _, tc := range tests {
+		got := splitIntoTokens(tc.input)
+		if len(got) != len(tc.want) {
+			t.Errorf("splitIntoTokens(%q) = %v, want %v", tc.input, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("splitIntoTokens(%q)[%d] = %q, want %q", tc.input, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+func TestPrintWordDiffPreservesNewlines(t *testing.T) {
+	var buf bytes.Buffer
+	app := &App{
+		Out:   &buf,
+		Theme: theme.Default(),
+	}
+
+	oldText := "line one\nline two"
+	newText := "line one\nline TWO"
+
+	app.printWordDiff(oldText, newText)
+	output := buf.String()
+
+	// Output should have multiple lines (not all on one line)
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 2 {
+		t.Errorf("expected multiple lines in output, got %d: %q", len(lines), output)
+	}
+}

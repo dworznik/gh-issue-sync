@@ -8,13 +8,13 @@ import (
 	"unicode/utf8"
 )
 
-// printWordDiff prints a colorized word-level diff that ignores whitespace differences.
+// printWordDiff prints a colorized word-level diff that preserves line structure.
 // Returns true if there were additional whitespace differences beyond the word changes
 // (but NOT if it's whitespace-only - that case is handled separately).
 func (a *App) printWordDiff(oldText, newText string) bool {
 	t := a.Theme
 
-	// Normalize whitespace for comparison
+	// Normalize whitespace for comparison (collapse all whitespace including newlines)
 	oldNorm := normalizeWhitespace(oldText)
 	newNorm := normalizeWhitespace(newText)
 
@@ -24,21 +24,22 @@ func (a *App) printWordDiff(oldText, newText string) bool {
 		return false // Don't add the extra note since we already said it's whitespace-only
 	}
 
-	// Split into words (preserving structure for display)
-	oldWords := splitIntoWords(oldText)
-	newWords := splitIntoWords(newText)
+	// Split into tokens (words + newlines)
+	oldTokens := splitIntoTokens(oldText)
+	newTokens := splitIntoTokens(newText)
 
-	// Compute word-level diff
-	ops := computeWordDiff(oldWords, newWords)
+	// Compute token-level diff
+	ops := computeWordDiff(oldTokens, newTokens)
 
-	// Refine adjacent delete+insert pairs into character-level diffs
+	// Refine adjacent delete+insert pairs into character-level diffs (skip newlines)
 	ops = refineWordDiff(ops)
 
-	// Render the diff
+	// Render the diff with line structure
 	a.renderWordDiff(ops)
 
-	// Check if there are additional whitespace differences beyond the word changes
-	// This happens when the word content is the same but whitespace formatting differs
+	// Check if there are additional whitespace differences beyond the token changes
+	oldWords := splitIntoWords(oldText)
+	newWords := splitIntoWords(newText)
 	return hasAdditionalWhitespaceChanges(oldText, newText, oldWords, newWords)
 }
 
@@ -65,7 +66,44 @@ func hasAdditionalWhitespaceChanges(oldText, newText string, oldWords, newWords 
 	return oldText != newText
 }
 
-// splitIntoWords splits text into words, preserving whitespace as separate tokens for context
+// splitIntoTokens splits text into words and newline tokens for diff comparison.
+// Newlines are preserved as "\n" tokens, other whitespace is collapsed.
+func splitIntoTokens(text string) []string {
+	var tokens []string
+	var current strings.Builder
+	inWord := false
+
+	for _, r := range text {
+		if r == '\n' {
+			// Flush current word if any
+			if inWord {
+				tokens = append(tokens, current.String())
+				current.Reset()
+				inWord = false
+			}
+			// Add newline as a token
+			tokens = append(tokens, "\n")
+		} else if unicode.IsSpace(r) {
+			if inWord {
+				tokens = append(tokens, current.String())
+				current.Reset()
+				inWord = false
+			}
+			// Skip other whitespace - we'll add spaces back when rendering
+		} else {
+			if !inWord {
+				inWord = true
+			}
+			current.WriteRune(r)
+		}
+	}
+	if current.Len() > 0 {
+		tokens = append(tokens, current.String())
+	}
+	return tokens
+}
+
+// splitIntoWords splits text into words only (no newlines), for inline diffs like titles
 func splitIntoWords(text string) []string {
 	var words []string
 	var current strings.Builder
@@ -95,6 +133,7 @@ func splitIntoWords(text string) []string {
 
 // refineWordDiff looks for adjacent delete+insert pairs and refines them
 // into character-level diffs if the words are similar enough.
+// Newline tokens are never refined.
 func refineWordDiff(ops []diffOp) []diffOp {
 	var result []diffOp
 	i := 0
@@ -110,7 +149,8 @@ func refineWordDiff(ops []diffOp) []diffOp {
 				oldWord, newWord = op2.Text, op1.Text
 			}
 
-			if oldWord != "" && newWord != "" && wordsSimilar(oldWord, newWord) {
+			// Don't refine newline tokens
+			if oldWord != "" && newWord != "" && oldWord != "\n" && newWord != "\n" && wordsSimilar(oldWord, newWord) {
 				// Refine into character-level diff
 				charOps := computeCharDiff(oldWord, newWord)
 				result = append(result, diffOp{
@@ -335,7 +375,7 @@ func computeWordDiff(oldWords, newWords []string) []diffOp {
 	return ops
 }
 
-// renderWordDiff renders a word diff with inline coloring
+// renderWordDiff renders a word diff with inline coloring, preserving newlines
 func (a *App) renderWordDiff(ops []diffOp) {
 	t := a.Theme
 	var line strings.Builder
@@ -344,11 +384,9 @@ func (a *App) renderWordDiff(ops []diffOp) {
 	indent := "    "
 
 	flushLine := func() {
-		if line.Len() > 0 {
-			fmt.Fprintf(a.Out, "%s%s\n", indent, line.String())
-			line.Reset()
-			lineLen = 0
-		}
+		fmt.Fprintf(a.Out, "%s%s\n", indent, line.String())
+		line.Reset()
+		lineLen = 0
 	}
 
 	addWord := func(word, styled string) {
@@ -365,6 +403,23 @@ func (a *App) renderWordDiff(ops []diffOp) {
 	}
 
 	for _, op := range ops {
+		// Handle newline tokens specially
+		if op.Text == "\n" {
+			switch op.Type {
+			case diffEqual:
+				flushLine()
+			case diffDelete:
+				// Show deleted newline as a marker at end of line, then newline
+				line.WriteString(t.Styler().FgStrikethrough(t.OldValue, "\\n"))
+				flushLine()
+			case diffInsert:
+				// Show inserted newline as a marker, then newline
+				line.WriteString(t.Styler().FgUnderline(t.NewValue, "\\n"))
+				flushLine()
+			}
+			continue
+		}
+
 		switch op.Type {
 		case diffEqual:
 			addWord(op.Text, op.Text)
@@ -385,7 +440,9 @@ func (a *App) renderWordDiff(ops []diffOp) {
 			addWord(string(make([]rune, wordLen)), styled)
 		}
 	}
-	flushLine()
+	if line.Len() > 0 {
+		flushLine()
+	}
 }
 
 // renderCharDiff renders character-level diff operations as a single styled string.
