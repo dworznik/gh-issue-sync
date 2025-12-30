@@ -39,6 +39,11 @@ func formatCommandSummary(name string, args []string) string {
 		return name
 	}
 
+	// For GraphQL commands, just return a simple summary
+	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
+		return "gh api graphql"
+	}
+
 	var parts []string
 	parts = append(parts, name)
 
@@ -49,7 +54,7 @@ func formatCommandSummary(name string, args []string) string {
 			continue
 		}
 
-		// Check if this is a flag that takes a long value
+		// Check if this is a flag that takes a long value (--flag value)
 		if strings.HasPrefix(arg, "--") && i+1 < len(args) {
 			flagName := arg
 			flagValue := args[i+1]
@@ -57,6 +62,16 @@ func formatCommandSummary(name string, args []string) string {
 			// Truncate long values (like --body)
 			if len(flagValue) > 50 {
 				parts = append(parts, flagName, truncateArg(flagValue, 50))
+				skipNext = true
+				continue
+			}
+		}
+
+		// Check for -f/-F flag=value style (used by gh api)
+		if (arg == "-f" || arg == "-F") && i+1 < len(args) {
+			flagValue := args[i+1]
+			if len(flagValue) > 50 {
+				parts = append(parts, arg, truncateArg(flagValue, 50))
 				skipNext = true
 				continue
 			}

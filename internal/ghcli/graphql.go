@@ -148,6 +148,11 @@ func (c *Client) GetIssueRelationshipsBatch(ctx context.Context, numbers []strin
 
 	out, err := c.runner.Run(ctx, "gh", args...)
 	if err != nil {
+		// Silently return empty results if the token lacks required scopes
+		// (e.g., read:project). This is not a fatal error.
+		if strings.Contains(err.Error(), "required scopes") {
+			return map[string]IssueRelationships{}, nil
+		}
 		return nil, err
 	}
 
@@ -165,6 +170,10 @@ func (c *Client) GetIssueRelationshipsBatch(ctx context.Context, numbers []strin
 	}
 
 	if len(resp.Errors) > 0 {
+		// Silently return empty results for scope errors
+		if strings.Contains(resp.Errors[0].Message, "required scopes") {
+			return map[string]IssueRelationships{}, nil
+		}
 		return nil, fmt.Errorf("GraphQL error: %s", resp.Errors[0].Message)
 	}
 
