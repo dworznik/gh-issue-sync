@@ -10,18 +10,30 @@ import (
 	"github.com/mitsuhiko/gh-issue-sync/internal/issue"
 )
 
-// IssueRelationships holds the parent and blocking relationship data for an issue.
+// IssueRelationships holds the parent, blocking, issue type, and project data for an issue.
 type IssueRelationships struct {
 	Parent    *issue.IssueRef
 	BlockedBy []issue.IssueRef
 	Blocks    []issue.IssueRef
+	IssueType string
+	Projects  []string
 }
 
 // graphqlIssue represents the GraphQL response structure for an issue.
 type graphqlIssue struct {
 	ID        string `json:"id"`
 	Number    int    `json:"number"`
-	Parent    *struct {
+	IssueType *struct {
+		Name string `json:"name"`
+	} `json:"issueType"`
+	ProjectItems *struct {
+		Nodes []struct {
+			Project struct {
+				Title string `json:"title"`
+			} `json:"project"`
+		} `json:"nodes"`
+	} `json:"projectItems"`
+	Parent *struct {
 		Number int    `json:"number"`
 		ID     string `json:"id"`
 	} `json:"parent"`
@@ -93,6 +105,12 @@ func (c *Client) GetIssueRelationshipsBatch(ctx context.Context, numbers []strin
 		issueQueries = append(issueQueries, fmt.Sprintf(`issue%d: issue(number: %d) {
       id
       number
+      issueType { name }
+      projectItems(first: 20) {
+        nodes {
+          project { title }
+        }
+      }
       parent {
         number
         id
@@ -167,6 +185,14 @@ func (c *Client) GetIssueRelationshipsBatch(ctx context.Context, numbers []strin
 		}
 
 		rels := IssueRelationships{}
+		if issueData.IssueType != nil {
+			rels.IssueType = issueData.IssueType.Name
+		}
+		if issueData.ProjectItems != nil {
+			for _, node := range issueData.ProjectItems.Nodes {
+				rels.Projects = append(rels.Projects, node.Project.Title)
+			}
+		}
 		if issueData.Parent != nil {
 			ref := issue.IssueRef(strconv.Itoa(issueData.Parent.Number))
 			rels.Parent = &ref

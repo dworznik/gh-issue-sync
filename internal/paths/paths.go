@@ -14,6 +14,8 @@ const (
 	ConfigFileName     = "config.json"
 	LabelsFileName     = "labels.json"
 	MilestonesFileName = "milestones.json"
+	IssueTypesFileName = "issue_types.json"
+	ProjectsFileName   = "projects.json"
 )
 
 type Paths struct {
@@ -26,6 +28,8 @@ type Paths struct {
 	ConfigPath     string
 	LabelsPath     string
 	MilestonesPath string
+	IssueTypesPath string
+	ProjectsPath   string
 }
 
 func New(root string) Paths {
@@ -37,6 +41,9 @@ func New(root string) Paths {
 	configPath := filepath.Join(syncDir, ConfigFileName)
 	labelsPath := filepath.Join(syncDir, LabelsFileName)
 	milestonesPath := filepath.Join(syncDir, MilestonesFileName)
+	issueTypesPath := filepath.Join(syncDir, IssueTypesFileName)
+
+	projectsPath := filepath.Join(syncDir, ProjectsFileName)
 
 	return Paths{
 		Root:           root,
@@ -48,6 +55,8 @@ func New(root string) Paths {
 		ConfigPath:     configPath,
 		LabelsPath:     labelsPath,
 		MilestonesPath: milestonesPath,
+		IssueTypesPath: issueTypesPath,
+		ProjectsPath:   projectsPath,
 	}
 }
 

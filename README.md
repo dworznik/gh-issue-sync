@@ -173,6 +173,7 @@ assignees:
   - alice
   - bob
 milestone: v2.0
+type: Bug
 state: open
 state_reason:
 synced_at: 2025-12-29T17:00:00Z
@@ -200,6 +201,8 @@ Should open the login modal.
 | `labels` | string[] | Label names | Yes |
 | `assignees` | string[] | GitHub usernames | Yes |
 | `milestone` | string | Milestone name | Yes |
+| `type` | string | Issue type (org repos only) | Yes |
+| `projects` | string[] | Project names | Yes |
 | `state` | string | `open` or `closed` | Via folder |
 | `state_reason` | string | `completed` or `not_planned` | Yes |
 | `parent` | int | Parent issue number | Yes |

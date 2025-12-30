@@ -102,6 +102,31 @@ type MilestoneEntry struct {
 	State       string  `json:"state"`
 }
 
+// IssueTypeCache stores the synced issue types from GitHub
+type IssueTypeCache struct {
+	IssueTypes []IssueTypeEntry `json:"issue_types"`
+	SyncedAt   time.Time        `json:"synced_at"`
+}
+
+// IssueTypeEntry represents a single issue type
+type IssueTypeEntry struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// ProjectCache stores the synced projects from GitHub
+type ProjectCache struct {
+	Projects []ProjectEntry `json:"projects"`
+	SyncedAt time.Time      `json:"synced_at"`
+}
+
+// ProjectEntry represents a single project
+type ProjectEntry struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
 func New(root string, runner ghcli.Runner, out io.Writer, errOut io.Writer) *App {
 	return &App{
 		Root:   root,
@@ -370,6 +395,51 @@ func (a *App) Pull(ctx context.Context, opts PullOptions, args []string) error {
 				fmt.Fprintf(a.Err, "%s saving milestone cache: %v\n", t.WarningText("Warning:"), err)
 			}
 		}
+
+		// Fetch and save issue types to cache (org repos only)
+		issueTypes, err := client.ListIssueTypes(ctx)
+		if err != nil {
+			fmt.Fprintf(a.Err, "%s fetching issue types: %v\n", t.WarningText("Warning:"), err)
+		} else if len(issueTypes) > 0 {
+			entries := make([]IssueTypeEntry, 0, len(issueTypes))
+			for _, it := range issueTypes {
+				entries = append(entries, IssueTypeEntry{
+					ID:          it.ID,
+					Name:        it.Name,
+					Description: it.Description,
+				})
+			}
+			// Sort for consistent output
+			sort.Slice(entries, func(i, j int) bool {
+				return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+			})
+			itCache := IssueTypeCache{IssueTypes: entries, SyncedAt: now}
+			if err := saveIssueTypeCache(p, itCache); err != nil {
+				fmt.Fprintf(a.Err, "%s saving issue type cache: %v\n", t.WarningText("Warning:"), err)
+			}
+		}
+
+		// Fetch and save projects to cache (requires read:project scope)
+		projects, err := client.ListProjects(ctx)
+		if err != nil {
+			// Don't warn - scope might not be available
+		} else if len(projects) > 0 {
+			entries := make([]ProjectEntry, 0, len(projects))
+			for _, proj := range projects {
+				entries = append(entries, ProjectEntry{
+					ID:    proj.ID,
+					Title: proj.Title,
+				})
+			}
+			// Sort for consistent output
+			sort.Slice(entries, func(i, j int) bool {
+				return strings.ToLower(entries[i].Title) < strings.ToLower(entries[j].Title)
+			})
+			projCache := ProjectCache{Projects: entries, SyncedAt: now}
+			if err := saveProjectCache(p, projCache); err != nil {
+				fmt.Fprintf(a.Err, "%s saving project cache: %v\n", t.WarningText("Warning:"), err)
+			}
+		}
 	}
 
 	if len(conflicts) > 0 {
@@ -539,6 +609,58 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 		}
 	}
 
+	// Load issue type cache (or fetch from remote if not cached)
+	issueTypeCache, err := loadIssueTypeCache(p)
+	if err != nil {
+		fmt.Fprintf(a.Err, "%s loading issue type cache: %v\n", t.WarningText("Warning:"), err)
+	}
+	knownIssueTypes := issueTypeByName(issueTypeCache)
+
+	// If no cache, fetch from remote
+	if len(knownIssueTypes) == 0 {
+		issueTypes, err := client.ListIssueTypes(ctx)
+		if err == nil {
+			for _, it := range issueTypes {
+				knownIssueTypes[strings.ToLower(it.Name)] = IssueTypeEntry{
+					ID:          it.ID,
+					Name:        it.Name,
+					Description: it.Description,
+				}
+				issueTypeCache.IssueTypes = append(issueTypeCache.IssueTypes, IssueTypeEntry{
+					ID:          it.ID,
+					Name:        it.Name,
+					Description: it.Description,
+				})
+			}
+			issueTypeCache.SyncedAt = a.Now().UTC()
+		}
+	}
+
+	// Load project cache (or fetch from remote if not cached)
+	projectCache, err := loadProjectCache(p)
+	if err != nil {
+		// Don't warn - projects are optional
+	}
+	knownProjects := projectByTitle(projectCache)
+
+	// If no cache, fetch from remote
+	if len(knownProjects) == 0 {
+		projects, err := client.ListProjects(ctx)
+		if err == nil {
+			for _, proj := range projects {
+				knownProjects[strings.ToLower(proj.Title)] = ProjectEntry{
+					ID:    proj.ID,
+					Title: proj.Title,
+				}
+				projectCache.Projects = append(projectCache.Projects, ProjectEntry{
+					ID:    proj.ID,
+					Title: proj.Title,
+				})
+			}
+			projectCache.SyncedAt = a.Now().UTC()
+		}
+	}
+
 	localIssues, err := loadLocalIssues(p)
 	if err != nil {
 		return err
@@ -684,7 +806,7 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 			return err
 		}
 
-		// Sync relationships for newly created issues (now that T-numbers are resolved)
+		// Sync relationships and issue type for newly created issues (now that T-numbers are resolved)
 		if !opts.DryRun {
 			for number := range createdNumbers {
 				// Find the issue in filteredIssues
@@ -693,6 +815,29 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 						if err := client.SyncRelationships(ctx, number, item.Issue); err != nil {
 							fmt.Fprintf(a.Err, "%s syncing relationships for #%s: %v\n",
 								t.WarningText("Warning:"), number, err)
+						}
+						// Set issue type if specified
+						if item.Issue.IssueType != "" {
+							if it, ok := knownIssueTypes[strings.ToLower(item.Issue.IssueType)]; ok {
+								if err := client.SetIssueType(ctx, number, it.ID); err != nil {
+									fmt.Fprintf(a.Err, "%s setting issue type for #%s: %v\n",
+										t.WarningText("Warning:"), number, err)
+								}
+							} else {
+								fmt.Fprintf(a.Err, "%s unknown issue type %q for #%s\n",
+									t.WarningText("Warning:"), item.Issue.IssueType, number)
+							}
+						}
+						// Add to projects if specified
+						if len(item.Issue.Projects) > 0 {
+							projectIDs := make(map[string]string)
+							for _, p := range knownProjects {
+								projectIDs[strings.ToLower(p.Title)] = p.ID
+							}
+							if err := client.SyncProjects(ctx, number, item.Issue.Projects, projectIDs); err != nil {
+								fmt.Fprintf(a.Err, "%s syncing projects for #%s: %v\n",
+									t.WarningText("Warning:"), number, err)
+							}
 						}
 						break
 					}
@@ -755,11 +900,42 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 			}
 		}
 
+		// Sync issue type via GraphQL (if changed)
+		if change.IssueType != nil {
+			issueTypeID := ""
+			if *change.IssueType != "" {
+				if it, ok := knownIssueTypes[strings.ToLower(*change.IssueType)]; ok {
+					issueTypeID = it.ID
+				} else {
+					fmt.Fprintf(a.Err, "%s unknown issue type %q for #%s\n",
+						t.WarningText("Warning:"), *change.IssueType, item.Issue.Number)
+				}
+			}
+			if issueTypeID != "" || *change.IssueType == "" {
+				if err := client.SetIssueType(ctx, item.Issue.Number.String(), issueTypeID); err != nil {
+					fmt.Fprintf(a.Err, "%s setting issue type for #%s: %v\n",
+						t.WarningText("Warning:"), item.Issue.Number, err)
+				}
+			}
+		}
+
 		// Sync parent and blocking relationships via GraphQL
 		if err := client.SyncRelationships(ctx, item.Issue.Number.String(), item.Issue); err != nil {
 			// Log but don't fail - relationships might not be supported
 			fmt.Fprintf(a.Err, "%s syncing relationships for #%s: %v\n",
 				t.WarningText("Warning:"), item.Issue.Number, err)
+		}
+
+		// Sync projects via GraphQL (if changed)
+		if len(change.AddProjects) > 0 || len(change.RemoveProjects) > 0 {
+			projectIDs := make(map[string]string)
+			for _, p := range knownProjects {
+				projectIDs[strings.ToLower(p.Title)] = p.ID
+			}
+			if err := client.SyncProjects(ctx, item.Issue.Number.String(), item.Issue.Projects, projectIDs); err != nil {
+				fmt.Fprintf(a.Err, "%s syncing projects for #%s: %v\n",
+					t.WarningText("Warning:"), item.Issue.Number, err)
+			}
 		}
 
 		item.Issue.SyncedAt = ptrTime(a.Now().UTC())
@@ -1300,6 +1476,16 @@ func (a *App) View(ctx context.Context, ref string, opts ViewOptions) error {
 		fmt.Fprintf(a.Out, "%s\t%s\n", t.MutedText("milestone:"), iss.Milestone)
 	}
 
+	// Issue Type
+	if iss.IssueType != "" {
+		fmt.Fprintf(a.Out, "%s\t%s\n", t.MutedText("type:"), iss.IssueType)
+	}
+
+	// Projects
+	if len(iss.Projects) > 0 {
+		fmt.Fprintf(a.Out, "%s\t%s\n", t.MutedText("projects:"), strings.Join(iss.Projects, ", "))
+	}
+
 	// Parent
 	if iss.Parent != nil {
 		fmt.Fprintf(a.Out, "%s\t#%s\n", t.MutedText("parent:"), iss.Parent.String())
@@ -1506,6 +1692,12 @@ func (a *App) Diff(ctx context.Context, number string, opts DiffOptions) error {
 	}
 	if base.Milestone != local.Milestone {
 		fmt.Fprintln(a.Out, t.FormatChange("milestone", formatOptionalString(base.Milestone), formatOptionalString(local.Milestone)))
+	}
+	if base.IssueType != local.IssueType {
+		fmt.Fprintln(a.Out, t.FormatChange("type", formatOptionalString(base.IssueType), formatOptionalString(local.IssueType)))
+	}
+	if !stringSlicesEqual(base.Projects, local.Projects) {
+		fmt.Fprintln(a.Out, t.FormatChange("projects", formatStringList(base.Projects), formatStringList(local.Projects)))
 	}
 
 	// Diff body with unified diff format
@@ -1746,6 +1938,72 @@ func milestoneNames(cache MilestoneCache) map[string]struct{} {
 	return m
 }
 
+func loadIssueTypeCache(p paths.Paths) (IssueTypeCache, error) {
+	var cache IssueTypeCache
+	data, err := os.ReadFile(p.IssueTypesPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return cache, nil
+		}
+		return cache, err
+	}
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return cache, err
+	}
+	return cache, nil
+}
+
+func saveIssueTypeCache(p paths.Paths, cache IssueTypeCache) error {
+	data, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(p.IssueTypesPath, data, 0o644)
+}
+
+// issueTypeByName returns a map of lowercase name -> IssueTypeEntry for quick lookups.
+func issueTypeByName(cache IssueTypeCache) map[string]IssueTypeEntry {
+	m := make(map[string]IssueTypeEntry, len(cache.IssueTypes))
+	for _, it := range cache.IssueTypes {
+		m[strings.ToLower(it.Name)] = it
+	}
+	return m
+}
+
+func loadProjectCache(p paths.Paths) (ProjectCache, error) {
+	var cache ProjectCache
+	data, err := os.ReadFile(p.ProjectsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return cache, nil
+		}
+		return cache, err
+	}
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return cache, err
+	}
+	return cache, nil
+}
+
+func saveProjectCache(p paths.Paths, cache ProjectCache) error {
+	data, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(p.ProjectsPath, data, 0o644)
+}
+
+// projectByTitle returns a map of lowercase title -> ProjectEntry for quick lookups.
+func projectByTitle(cache ProjectCache) map[string]ProjectEntry {
+	m := make(map[string]ProjectEntry, len(cache.Projects))
+	for _, p := range cache.Projects {
+		m[strings.ToLower(p.Title)] = p
+	}
+	return m
+}
+
 // randomLabelColor returns a random visually pleasing color for labels.
 func randomLabelColor() string {
 	colors := []string{
@@ -1817,9 +2075,14 @@ func diffIssue(original issue.Issue, local issue.Issue) ghcli.IssueChange {
 	}
 	change.AddLabels, change.RemoveLabels = diffStringSet(original.Labels, local.Labels)
 	change.AddAssignees, change.RemoveAssignees = diffStringSet(original.Assignees, local.Assignees)
+	change.AddProjects, change.RemoveProjects = diffStringSet(original.Projects, local.Projects)
 	if original.Milestone != local.Milestone {
 		milestone := local.Milestone
 		change.Milestone = &milestone
+	}
+	if original.IssueType != local.IssueType {
+		issueType := local.IssueType
+		change.IssueType = &issueType
 	}
 	if original.State != "" && original.State != local.State {
 		transition := ""
@@ -1842,6 +2105,7 @@ func diffIssue(original issue.Issue, local issue.Issue) ghcli.IssueChange {
 }
 
 func hasEdits(change ghcli.IssueChange) bool {
+	// Note: IssueType is not included here because it's handled via GraphQL separately
 	return change.Title != nil || change.Body != nil || change.Milestone != nil || len(change.AddLabels) > 0 || len(change.RemoveLabels) > 0 || len(change.AddAssignees) > 0 || len(change.RemoveAssignees) > 0
 }
 
@@ -1870,6 +2134,12 @@ func (a *App) formatChangeLines(oldIssue, newIssue issue.Issue, labelColors map[
 	}
 	if oldIssue.Milestone != newIssue.Milestone {
 		lines = append(lines, t.FormatChange("milestone", formatOptionalString(oldIssue.Milestone), formatOptionalString(newIssue.Milestone)))
+	}
+	if oldIssue.IssueType != newIssue.IssueType {
+		lines = append(lines, t.FormatChange("type", formatOptionalString(oldIssue.IssueType), formatOptionalString(newIssue.IssueType)))
+	}
+	if !stringSlicesEqual(oldIssue.Projects, newIssue.Projects) {
+		lines = append(lines, t.FormatChange("projects", formatStringList(oldIssue.Projects), formatStringList(newIssue.Projects)))
 	}
 	if oldIssue.State != newIssue.State {
 		lines = append(lines, t.FormatChange("state", formatOptionalString(oldIssue.State), formatOptionalString(newIssue.State)))

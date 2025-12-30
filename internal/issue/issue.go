@@ -25,6 +25,8 @@ type Issue struct {
 	Labels      []string
 	Assignees   []string
 	Milestone   string
+	IssueType   string
+	Projects    []string
 	State       string
 	StateReason *string
 	Parent      *IssueRef
@@ -35,16 +37,18 @@ type Issue struct {
 }
 
 type FrontMatter struct {
-	Title       string      `yaml:"title"`
-	Labels      []string    `yaml:"labels,omitempty"`
-	Assignees   []string    `yaml:"assignees,omitempty"`
-	Milestone   string      `yaml:"milestone,omitempty"`
-	State       string      `yaml:"state,omitempty"`
-	StateReason *string     `yaml:"state_reason"`
-	Parent      *IssueRef   `yaml:"parent,omitempty"`
-	BlockedBy   []IssueRef  `yaml:"blocked_by,omitempty"`
-	Blocks      []IssueRef  `yaml:"blocks,omitempty"`
-	SyncedAt    *time.Time  `yaml:"synced_at,omitempty"`
+	Title       string     `yaml:"title"`
+	Labels      []string   `yaml:"labels,omitempty"`
+	Assignees   []string   `yaml:"assignees,omitempty"`
+	Milestone   string     `yaml:"milestone,omitempty"`
+	IssueType   string     `yaml:"type,omitempty"`
+	Projects    []string   `yaml:"projects,omitempty"`
+	State       string     `yaml:"state,omitempty"`
+	StateReason *string    `yaml:"state_reason"`
+	Parent      *IssueRef  `yaml:"parent,omitempty"`
+	BlockedBy   []IssueRef `yaml:"blocked_by,omitempty"`
+	Blocks      []IssueRef `yaml:"blocks,omitempty"`
+	SyncedAt    *time.Time `yaml:"synced_at,omitempty"`
 }
 
 func (n IssueNumber) String() string {
@@ -127,6 +131,8 @@ func Parse(data []byte) (Issue, error) {
 		Labels:      fm.Labels,
 		Assignees:   fm.Assignees,
 		Milestone:   fm.Milestone,
+		IssueType:   fm.IssueType,
+		Projects:    fm.Projects,
 		State:       fm.State,
 		StateReason: fm.StateReason,
 		Parent:      fm.Parent,
@@ -144,6 +150,8 @@ func Render(issue Issue) (string, error) {
 		Labels:      sortedStrings(issue.Labels),
 		Assignees:   sortedStrings(issue.Assignees),
 		Milestone:   issue.Milestone,
+		IssueType:   issue.IssueType,
+		Projects:    sortedStrings(issue.Projects),
 		State:       issue.State,
 		StateReason: issue.StateReason,
 		Parent:      issue.Parent,
@@ -189,6 +197,7 @@ func PathFor(dir string, number IssueNumber, title string) string {
 func Normalize(issue Issue) Issue {
 	issue.Labels = sortedStrings(issue.Labels)
 	issue.Assignees = sortedStrings(issue.Assignees)
+	issue.Projects = sortedStrings(issue.Projects)
 	issue.BlockedBy = sortedRefs(issue.BlockedBy)
 	issue.Blocks = sortedRefs(issue.Blocks)
 	issue.Body = normalizeBody(issue.Body)
@@ -225,6 +234,12 @@ func equalIssues(a, b Issue, ignoreStateReason bool) bool {
 		return false
 	}
 	if a.Milestone != b.Milestone {
+		return false
+	}
+	if a.IssueType != b.IssueType {
+		return false
+	}
+	if !stringSlicesEqual(a.Projects, b.Projects) {
 		return false
 	}
 	if a.State != b.State {

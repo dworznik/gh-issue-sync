@@ -185,6 +185,8 @@ func (c *Client) ListIssuesWithRelationships(ctx context.Context, state string, 
         labels(first: 100) { nodes { name } }
         assignees(first: 100) { nodes { login } }
         milestone { title }
+        issueType { name }
+        projectItems(first: 20) { nodes { project { title } } }
         parent { number }
         blockedBy(first: 100) { nodes { number } }
         blocking(first: 100) { nodes { number } }
@@ -237,6 +239,16 @@ func (c *Client) ListIssuesWithRelationships(ctx context.Context, state string, 
 							Milestone *struct {
 								Title string `json:"title"`
 							} `json:"milestone"`
+							IssueType *struct {
+								Name string `json:"name"`
+							} `json:"issueType"`
+							ProjectItems *struct {
+								Nodes []struct {
+									Project struct {
+										Title string `json:"title"`
+									} `json:"project"`
+								} `json:"nodes"`
+							} `json:"projectItems"`
 							Parent *struct {
 								Number int `json:"number"`
 							} `json:"parent"`
@@ -287,6 +299,17 @@ func (c *Client) ListIssuesWithRelationships(ctx context.Context, state string, 
 			if node.Milestone != nil {
 				milestone = node.Milestone.Title
 			}
+			issueType := ""
+			if node.IssueType != nil {
+				issueType = node.IssueType.Name
+			}
+
+			var projects []string
+			if node.ProjectItems != nil {
+				for _, pi := range node.ProjectItems.Nodes {
+					projects = append(projects, pi.Project.Title)
+				}
+			}
 
 			iss := issue.Issue{
 				Number:      issue.IssueNumber(strconv.Itoa(node.Number)),
@@ -297,6 +320,8 @@ func (c *Client) ListIssuesWithRelationships(ctx context.Context, state string, 
 				Labels:      issLabels,
 				Assignees:   assignees,
 				Milestone:   milestone,
+				IssueType:   issueType,
+				Projects:    projects,
 			}
 
 			if node.Parent != nil {
@@ -338,6 +363,8 @@ func (c *Client) EnrichWithRelationships(ctx context.Context, iss *issue.Issue) 
 	iss.Parent = rels.Parent
 	iss.BlockedBy = rels.BlockedBy
 	iss.Blocks = rels.Blocks
+	iss.IssueType = rels.IssueType
+	iss.Projects = rels.Projects
 	return nil
 }
 
@@ -370,6 +397,8 @@ func (c *Client) EnrichWithRelationshipsBatch(ctx context.Context, issues []issu
 			issues[i].Parent = rel.Parent
 			issues[i].BlockedBy = rel.BlockedBy
 			issues[i].Blocks = rel.Blocks
+			issues[i].IssueType = rel.IssueType
+			issues[i].Projects = rel.Projects
 		}
 	}
 
@@ -417,6 +446,8 @@ func (c *Client) GetIssuesBatch(ctx context.Context, numbers []string) (map[stri
       labels(first: 100) { nodes { name } }
       assignees(first: 100) { nodes { login } }
       milestone { title }
+      issueType { name }
+      projectItems(first: 20) { nodes { project { title } } }
       parent { number }
       blockedBy(first: 100) { nodes { number } }
       blocking(first: 100) { nodes { number } }
@@ -489,6 +520,16 @@ func (c *Client) GetIssuesBatch(ctx context.Context, numbers []string) (map[stri
 			Milestone *struct {
 				Title string `json:"title"`
 			} `json:"milestone"`
+			IssueType *struct {
+				Name string `json:"name"`
+			} `json:"issueType"`
+			ProjectItems *struct {
+				Nodes []struct {
+					Project struct {
+						Title string `json:"title"`
+					} `json:"project"`
+				} `json:"nodes"`
+			} `json:"projectItems"`
 			Parent *struct {
 				Number int `json:"number"`
 			} `json:"parent"`
@@ -519,6 +560,16 @@ func (c *Client) GetIssuesBatch(ctx context.Context, numbers []string) (map[stri
 		if issueData.Milestone != nil {
 			milestone = issueData.Milestone.Title
 		}
+		issueType := ""
+		if issueData.IssueType != nil {
+			issueType = issueData.IssueType.Name
+		}
+		var projects []string
+		if issueData.ProjectItems != nil {
+			for _, pi := range issueData.ProjectItems.Nodes {
+				projects = append(projects, pi.Project.Title)
+			}
+		}
 
 		iss := issue.Issue{
 			Number:      issue.IssueNumber(strconv.Itoa(issueData.Number)),
@@ -529,6 +580,8 @@ func (c *Client) GetIssuesBatch(ctx context.Context, numbers []string) (map[stri
 			Labels:      labels,
 			Assignees:   assignees,
 			Milestone:   milestone,
+			IssueType:   issueType,
+			Projects:    projects,
 		}
 
 		if issueData.Parent != nil {
@@ -726,6 +779,9 @@ type IssueChange struct {
 	Title           *string
 	Body            *string
 	Milestone       *string
+	IssueType       *string
+	AddProjects     []string
+	RemoveProjects  []string
 	AddLabels       []string
 	RemoveLabels    []string
 	AddAssignees    []string
@@ -737,4 +793,549 @@ type IssueChange struct {
 	StateWasClosed  bool
 	StateIsOpen     bool
 	StateIsClosed   bool
+}
+
+// IssueType represents a GitHub issue type (org-level).
+type IssueType struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// ListIssueTypes fetches all issue types from the repository's organization.
+// Issue types are an organization-level feature, so this queries the org that owns the repo.
+// Returns an empty list (not an error) if issue types are not available.
+func (c *Client) ListIssueTypes(ctx context.Context) ([]IssueType, error) {
+	owner, repo := splitRepo(c.repo)
+	if owner == "" || repo == "" {
+		return nil, fmt.Errorf("invalid repository format")
+	}
+
+	// First, try to get issue types from the repository directly
+	// This works for organization repos
+	query := `query($owner: String!, $repo: String!) {
+  repository(owner: $owner, name: $repo) {
+    issueTypes(first: 50) {
+      nodes {
+        id
+        name
+        description
+      }
+    }
+  }
+}`
+
+	args := []string{"api", "graphql",
+		"-f", fmt.Sprintf("query=%s", query),
+		"-F", fmt.Sprintf("owner=%s", owner),
+		"-F", fmt.Sprintf("repo=%s", repo),
+	}
+
+	out, err := c.runner.Run(ctx, "gh", args...)
+	if err != nil {
+		// Issue types might not be available (e.g., personal repo)
+		return nil, nil
+	}
+
+	var resp struct {
+		Data struct {
+			Repository struct {
+				IssueTypes struct {
+					Nodes []struct {
+						ID          string `json:"id"`
+						Name        string `json:"name"`
+						Description string `json:"description"`
+					} `json:"nodes"`
+				} `json:"issueTypes"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, nil
+	}
+
+	if len(resp.Errors) > 0 {
+		// Likely not an org repo or feature not enabled
+		return nil, nil
+	}
+
+	var types []IssueType
+	for _, t := range resp.Data.Repository.IssueTypes.Nodes {
+		types = append(types, IssueType{
+			ID:          t.ID,
+			Name:        t.Name,
+			Description: t.Description,
+		})
+	}
+
+	return types, nil
+}
+
+// SetIssueType sets or clears the issue type for an issue.
+// If issueTypeID is empty, the issue type is cleared.
+func (c *Client) SetIssueType(ctx context.Context, issueNumber string, issueTypeID string) error {
+	issueNodeID, err := c.GetIssueNodeID(ctx, issueNumber)
+	if err != nil {
+		return fmt.Errorf("failed to get issue node ID: %w", err)
+	}
+
+	var mutation string
+	var args []string
+
+	if issueTypeID == "" {
+		// Clear issue type by setting to null
+		mutation = `mutation($issueId: ID!) {
+  updateIssue(input: {id: $issueId, issueTypeId: null}) {
+    issue { id }
+  }
+}`
+		args = []string{"api", "graphql",
+			"-f", fmt.Sprintf("query=%s", mutation),
+			"-f", fmt.Sprintf("issueId=%s", issueNodeID),
+		}
+	} else {
+		mutation = `mutation($issueId: ID!, $issueTypeId: ID!) {
+  updateIssue(input: {id: $issueId, issueTypeId: $issueTypeId}) {
+    issue { id }
+  }
+}`
+		args = []string{"api", "graphql",
+			"-f", fmt.Sprintf("query=%s", mutation),
+			"-f", fmt.Sprintf("issueId=%s", issueNodeID),
+			"-f", fmt.Sprintf("issueTypeId=%s", issueTypeID),
+		}
+	}
+
+	out, err := c.runner.Run(ctx, "gh", args...)
+	if err != nil {
+		return err
+	}
+
+	var resp struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return fmt.Errorf("failed to parse GraphQL response: %w", err)
+	}
+
+	if len(resp.Errors) > 0 {
+		return fmt.Errorf("GraphQL error: %s", resp.Errors[0].Message)
+	}
+
+	return nil
+}
+
+// Project represents a GitHub Project V2.
+type Project struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// ListProjects fetches all projects accessible from the repository.
+// This includes both organization projects and user projects.
+// Returns an empty list (not an error) if projects are not available or scope is missing.
+func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
+	owner, repo := splitRepo(c.repo)
+	if owner == "" || repo == "" {
+		return nil, fmt.Errorf("invalid repository format")
+	}
+
+	// Try to get projects from the repository owner (org or user)
+	// First try as organization
+	query := `query($owner: String!) {
+  organization(login: $owner) {
+    projectsV2(first: 100) {
+      nodes {
+        id
+        title
+      }
+    }
+  }
+}`
+
+	args := []string{"api", "graphql",
+		"-f", fmt.Sprintf("query=%s", query),
+		"-F", fmt.Sprintf("owner=%s", owner),
+	}
+
+	out, err := c.runner.Run(ctx, "gh", args...)
+	if err != nil {
+		// Try as user instead
+		return c.listUserProjects(ctx, owner)
+	}
+
+	var resp struct {
+		Data struct {
+			Organization struct {
+				ProjectsV2 struct {
+					Nodes []struct {
+						ID    string `json:"id"`
+						Title string `json:"title"`
+					} `json:"nodes"`
+				} `json:"projectsV2"`
+			} `json:"organization"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"errors"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, nil
+	}
+
+	// Check for scope errors - return empty list gracefully
+	for _, e := range resp.Errors {
+		if e.Type == "INSUFFICIENT_SCOPES" {
+			return nil, nil
+		}
+	}
+
+	if len(resp.Errors) > 0 {
+		// Try as user
+		return c.listUserProjects(ctx, owner)
+	}
+
+	var projects []Project
+	for _, p := range resp.Data.Organization.ProjectsV2.Nodes {
+		projects = append(projects, Project{
+			ID:    p.ID,
+			Title: p.Title,
+		})
+	}
+
+	return projects, nil
+}
+
+func (c *Client) listUserProjects(ctx context.Context, login string) ([]Project, error) {
+	query := `query($login: String!) {
+  user(login: $login) {
+    projectsV2(first: 100) {
+      nodes {
+        id
+        title
+      }
+    }
+  }
+}`
+
+	args := []string{"api", "graphql",
+		"-f", fmt.Sprintf("query=%s", query),
+		"-F", fmt.Sprintf("login=%s", login),
+	}
+
+	out, err := c.runner.Run(ctx, "gh", args...)
+	if err != nil {
+		return nil, nil
+	}
+
+	var resp struct {
+		Data struct {
+			User struct {
+				ProjectsV2 struct {
+					Nodes []struct {
+						ID    string `json:"id"`
+						Title string `json:"title"`
+					} `json:"nodes"`
+				} `json:"projectsV2"`
+			} `json:"user"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"errors"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, nil
+	}
+
+	// Check for scope errors - return empty list gracefully
+	for _, e := range resp.Errors {
+		if e.Type == "INSUFFICIENT_SCOPES" {
+			return nil, nil
+		}
+	}
+
+	var projects []Project
+	for _, p := range resp.Data.User.ProjectsV2.Nodes {
+		projects = append(projects, Project{
+			ID:    p.ID,
+			Title: p.Title,
+		})
+	}
+
+	return projects, nil
+}
+
+// AddToProject adds an issue to a project.
+// Returns nil if successful, or an error (including scope errors).
+func (c *Client) AddToProject(ctx context.Context, issueNumber string, projectID string) error {
+	issueNodeID, err := c.GetIssueNodeID(ctx, issueNumber)
+	if err != nil {
+		return fmt.Errorf("failed to get issue node ID: %w", err)
+	}
+
+	mutation := `mutation($projectId: ID!, $contentId: ID!) {
+  addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+    item { id }
+  }
+}`
+
+	args := []string{"api", "graphql",
+		"-f", fmt.Sprintf("query=%s", mutation),
+		"-f", fmt.Sprintf("projectId=%s", projectID),
+		"-f", fmt.Sprintf("contentId=%s", issueNodeID),
+	}
+
+	out, err := c.runner.Run(ctx, "gh", args...)
+	if err != nil {
+		// Check if it's a scope error
+		if strings.Contains(err.Error(), "INSUFFICIENT_SCOPES") {
+			return fmt.Errorf("missing 'project' scope - run 'gh auth refresh -s project' to enable")
+		}
+		return err
+	}
+
+	var resp struct {
+		Errors []struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return fmt.Errorf("failed to parse GraphQL response: %w", err)
+	}
+
+	for _, e := range resp.Errors {
+		if e.Type == "INSUFFICIENT_SCOPES" {
+			return fmt.Errorf("missing 'project' scope - run 'gh auth refresh -s project' to enable")
+		}
+	}
+
+	if len(resp.Errors) > 0 {
+		return fmt.Errorf("GraphQL error: %s", resp.Errors[0].Message)
+	}
+
+	return nil
+}
+
+// RemoveFromProject removes an issue from a project.
+// Returns nil if successful, or an error (including scope errors).
+func (c *Client) RemoveFromProject(ctx context.Context, issueNumber string, projectID string) error {
+	issueNodeID, err := c.GetIssueNodeID(ctx, issueNumber)
+	if err != nil {
+		return fmt.Errorf("failed to get issue node ID: %w", err)
+	}
+
+	// First, we need to find the project item ID for this issue in this project
+	query := `query($issueId: ID!) {
+  node(id: $issueId) {
+    ... on Issue {
+      projectItems(first: 100) {
+        nodes {
+          id
+          project { id }
+        }
+      }
+    }
+  }
+}`
+
+	args := []string{"api", "graphql",
+		"-f", fmt.Sprintf("query=%s", query),
+		"-f", fmt.Sprintf("issueId=%s", issueNodeID),
+	}
+
+	out, err := c.runner.Run(ctx, "gh", args...)
+	if err != nil {
+		return err
+	}
+
+	var queryResp struct {
+		Data struct {
+			Node struct {
+				ProjectItems struct {
+					Nodes []struct {
+						ID      string `json:"id"`
+						Project struct {
+							ID string `json:"id"`
+						} `json:"project"`
+					} `json:"nodes"`
+				} `json:"projectItems"`
+			} `json:"node"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"errors"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &queryResp); err != nil {
+		return fmt.Errorf("failed to parse GraphQL response: %w", err)
+	}
+
+	// Find the item ID for this project
+	var itemID string
+	for _, item := range queryResp.Data.Node.ProjectItems.Nodes {
+		if item.Project.ID == projectID {
+			itemID = item.ID
+			break
+		}
+	}
+
+	if itemID == "" {
+		// Issue is not in this project, nothing to do
+		return nil
+	}
+
+	// Now delete the item
+	mutation := `mutation($projectId: ID!, $itemId: ID!) {
+  deleteProjectV2Item(input: {projectId: $projectId, itemId: $itemId}) {
+    deletedItemId
+  }
+}`
+
+	args = []string{"api", "graphql",
+		"-f", fmt.Sprintf("query=%s", mutation),
+		"-f", fmt.Sprintf("projectId=%s", projectID),
+		"-f", fmt.Sprintf("itemId=%s", itemID),
+	}
+
+	out, err = c.runner.Run(ctx, "gh", args...)
+	if err != nil {
+		if strings.Contains(err.Error(), "INSUFFICIENT_SCOPES") {
+			return fmt.Errorf("missing 'project' scope - run 'gh auth refresh -s project' to enable")
+		}
+		return err
+	}
+
+	var mutResp struct {
+		Errors []struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(out), &mutResp); err != nil {
+		return fmt.Errorf("failed to parse GraphQL response: %w", err)
+	}
+
+	for _, e := range mutResp.Errors {
+		if e.Type == "INSUFFICIENT_SCOPES" {
+			return fmt.Errorf("missing 'project' scope - run 'gh auth refresh -s project' to enable")
+		}
+	}
+
+	if len(mutResp.Errors) > 0 {
+		return fmt.Errorf("GraphQL error: %s", mutResp.Errors[0].Message)
+	}
+
+	return nil
+}
+
+// SyncProjects syncs the project memberships for an issue.
+// It compares the desired state (from local issue) with the current remote state
+// and adds/removes project memberships as needed.
+// Returns nil on success. Scope errors are logged but don't cause failure.
+func (c *Client) SyncProjects(ctx context.Context, issueNumber string, localProjects []string, knownProjects map[string]string) error {
+	// Get current project memberships
+	issueNodeID, err := c.GetIssueNodeID(ctx, issueNumber)
+	if err != nil {
+		return fmt.Errorf("failed to get issue node ID: %w", err)
+	}
+
+	query := `query($issueId: ID!) {
+  node(id: $issueId) {
+    ... on Issue {
+      projectItems(first: 100) {
+        nodes {
+          project {
+            id
+            title
+          }
+        }
+      }
+    }
+  }
+}`
+
+	args := []string{"api", "graphql",
+		"-f", fmt.Sprintf("query=%s", query),
+		"-f", fmt.Sprintf("issueId=%s", issueNodeID),
+	}
+
+	out, err := c.runner.Run(ctx, "gh", args...)
+	if err != nil {
+		return nil // Graceful fallback
+	}
+
+	var resp struct {
+		Data struct {
+			Node struct {
+				ProjectItems struct {
+					Nodes []struct {
+						Project struct {
+							ID    string `json:"id"`
+							Title string `json:"title"`
+						} `json:"project"`
+					} `json:"nodes"`
+				} `json:"projectItems"`
+			} `json:"node"`
+		} `json:"data"`
+		Errors []struct {
+			Type string `json:"type"`
+		} `json:"errors"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil
+	}
+
+	// Check for scope errors
+	for _, e := range resp.Errors {
+		if e.Type == "INSUFFICIENT_SCOPES" {
+			return nil
+		}
+	}
+
+	// Build sets for comparison
+	remoteProjects := make(map[string]string) // title -> id
+	for _, item := range resp.Data.Node.ProjectItems.Nodes {
+		remoteProjects[item.Project.Title] = item.Project.ID
+	}
+
+	localSet := make(map[string]struct{})
+	for _, p := range localProjects {
+		localSet[p] = struct{}{}
+	}
+
+	// Add to new projects
+	for _, title := range localProjects {
+		if _, inRemote := remoteProjects[title]; !inRemote {
+			if projectID, known := knownProjects[strings.ToLower(title)]; known {
+				if err := c.AddToProject(ctx, issueNumber, projectID); err != nil {
+					// Return error - caller will log it
+					return err
+				}
+			}
+		}
+	}
+
+	// Remove from old projects
+	for title, projectID := range remoteProjects {
+		if _, inLocal := localSet[title]; !inLocal {
+			if err := c.RemoveFromProject(ctx, issueNumber, projectID); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
