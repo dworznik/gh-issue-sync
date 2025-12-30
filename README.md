@@ -1,11 +1,12 @@
 # gh-issue-sync
 
-Sync GitHub issues to local Markdown files for offline editing, batch updates,
-and seamless integration with coding agents.
+`gh-issue-sync` is a simple command line tool that can sync GitHub issues to
+local Markdown files for offline editing, batch updates, and seamless
+integration with coding agents and back up.
 
 The idea here is that you can bring in the state of a bunch of GitHub issues
 locally so that you can refine them with an agent until you're satisfied and
-sync back up the changes.  It can also be useful if you are working with an
+sync back up the changes.  It can also be useful if you are working without
 internet for one reason or another and you want to have your issues readable
 locally.
 
@@ -15,17 +16,9 @@ locally.
 Markdown files with YAML front matter.  Edit issues in your favorite editor,
 create new issues locally, and push changes back to GitHub when ready.
 
-**Key features:**
-
-- **Bidirectional sync** – Pull issues from GitHub, push local changes back
-- **Local issue creation** – Create issues locally with temporary IDs (T1, T2), promote to real GitHub issues on push
-- **Conflict detection** – Three-way merge logic prevents accidental overwrites
-- **Folder-based state** – Move files between `open/` and `closed/` to change issue state
-- **Leverages `gh` CLI** – Uses your existing GitHub CLI authentication
-
 ## Installation
 
-### Prerequisites
+Prerequisites:
 
 - [Go 1.21+](https://go.dev/dl/)
 - [GitHub CLI (`gh`)](https://cli.github.com/) installed and authenticated (`gh auth login`)
@@ -275,17 +268,7 @@ state_reason:
 synced_at: 2025-12-29T17:00:00Z
 ---
 
-The login button doesn't respond to taps on iOS Safari 17.x.
-
-## Steps to Reproduce
-
-1. Open the app on iOS Safari
-2. Tap the login button
-3. Nothing happens
-
-## Expected Behavior
-
-Should open the login modal.
+The body of the issue goes here!
 ```
 
 ### Front Matter Fields
@@ -312,7 +295,7 @@ Files are named `{number}-{slug}.md` where slug is derived from the title:
 - `123-fix-login-bug.md`
 - `T1-new-feature.md`
 
-The slug is for readability only—the tool identifies issues by the number prefix.
+The slug is for readability only, the tool identifies issues by the number prefix.
 
 ## Conflict Handling
 
