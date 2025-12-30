@@ -73,11 +73,11 @@ type ListCommand struct {
 	All       bool     `long:"all" short:"a" description:"Include closed issues"`
 	State     string   `long:"state" choice:"open" choice:"closed" description:"Filter by state"`
 	Label     []string `long:"label" short:"l" value-name:"LABEL" description:"Filter by label (repeatable)"`
-	Assignee  string   `long:"assignee" description:"Filter by assignee"`
-	Author    string   `long:"author" short:"A" description:"Filter by author"`
-	Milestone string   `long:"milestone" short:"M" description:"Filter by milestone"`
-	Mention   string   `long:"mention" description:"Filter by @mention in body"`
-	Limit     int      `long:"limit" short:"L" description:"Maximum number of issues to show"`
+	Assignee  string   `long:"assignee" value-name:"USER" description:"Filter by assignee"`
+	Author    string   `long:"author" short:"A" value-name:"USER" description:"Filter by author"`
+	Milestone string   `long:"milestone" short:"M" value-name:"NAME" description:"Filter by milestone"`
+	Mention   string   `long:"mention" value-name:"USER" description:"Filter by @mention in body"`
+	Limit     int      `long:"limit" short:"L" value-name:"N" description:"Maximum number of issues to show"`
 	Local     bool     `long:"local" description:"Show only local (unpushed) issues"`
 	Modified  bool     `long:"modified" short:"m" description:"Show only modified issues"`
 }
