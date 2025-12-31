@@ -19,21 +19,26 @@ import (
 )
 
 type progressReporter struct {
-	out         io.Writer
-	file        *os.File
-	isTTY       bool
-	started     bool
-	theme       *theme.Theme
-	start       time.Time
-	lastEvent   ghcli.ProgressEvent
+	out          io.Writer
+	file         *os.File
+	isTTY        bool
+	started      bool
+	theme        *theme.Theme
+	start        time.Time
+	lastEvent    ghcli.ProgressEvent
 	cursorHidden bool
-	cursorUnreg func()
-	pulseActive bool
-	pulsePos    int
-	pulseDir    int
-	pulseStop   chan struct{}
-	pulseDone   chan struct{}
-	mu          sync.Mutex
+	cursorUnreg  func()
+	pulseActive  bool
+	pulsePos     int
+	pulseDir     int
+	pulseStop    chan struct{}
+	pulseDone    chan struct{}
+	mu           sync.Mutex
+
+	// Step-based progress (alternative to event-based)
+	phase     string
+	completed int
+	total     int
 }
 
 const (
@@ -61,6 +66,7 @@ func newProgressReporter(out io.Writer, t *theme.Theme) *progressReporter {
 	}
 }
 
+// Update is called by the ghcli client to report progress during pull operations.
 func (p *progressReporter) Update(event ghcli.ProgressEvent) {
 	if !p.isTTY {
 		if event.Stage == ghcli.ProgressListIssuesPageStart {
@@ -88,10 +94,94 @@ func (p *progressReporter) Update(event ghcli.ProgressEvent) {
 	} else {
 		p.startPulseLocked()
 	}
-	msg := p.formatProgressLineLocked(event)
+	msg := p.formatProgressLineLocked()
 	fmt.Fprintf(p.out, "\r%s\x1b[K", msg)
 	p.started = true
 	p.mu.Unlock()
+}
+
+// SetTotal sets the total number of steps for step-based progress.
+func (p *progressReporter) SetTotal(total int) {
+	p.mu.Lock()
+	p.total = total
+	shouldStopPulse := total > 0 && p.pulseActive
+	shouldRender := p.isTTY && p.started
+	p.mu.Unlock()
+
+	if shouldStopPulse {
+		p.stopPulse()
+	}
+
+	if shouldRender {
+		p.mu.Lock()
+		p.renderLocked()
+		p.mu.Unlock()
+	}
+}
+
+// Completed returns the current number of completed steps.
+func (p *progressReporter) Completed() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.completed
+}
+
+// SetPhase updates the current phase name shown in the progress bar.
+func (p *progressReporter) SetPhase(phase string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.phase = phase
+	if p.isTTY && p.started {
+		p.renderLocked()
+	}
+}
+
+// Advance increments the completed count by 1.
+func (p *progressReporter) Advance() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.completed++
+	if p.isTTY && p.started {
+		p.renderLocked()
+	}
+}
+
+// Log prints a message above the progress bar. The progress bar is cleared,
+// the message is printed with a newline, then the progress bar is redrawn.
+func (p *progressReporter) Log(msg string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.isTTY {
+		fmt.Fprintln(p.out, msg)
+		return
+	}
+	if p.started {
+		// Clear the current progress line
+		fmt.Fprint(p.out, "\r\x1b[K")
+	}
+	fmt.Fprintln(p.out, msg)
+	if p.started {
+		p.renderLocked()
+	}
+}
+
+// Start begins showing the progress bar (for step-based progress).
+func (p *progressReporter) Start() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.isTTY {
+		return
+	}
+	if p.start.IsZero() {
+		p.start = time.Now()
+	}
+	p.started = true
+	p.hideCursorLocked()
+	// Start pulse animation if indeterminate
+	if p.total <= 0 {
+		p.startPulseLocked()
+	}
+	p.renderLocked()
 }
 
 func (p *progressReporter) Done() {
@@ -103,15 +193,21 @@ func (p *progressReporter) Done() {
 	if p.started {
 		fmt.Fprint(p.out, "\r\x1b[K")
 	}
+	p.started = false
 	p.mu.Unlock()
 	p.restoreCursor()
 	p.unregisterCursorRestore()
 }
 
-func (p *progressReporter) formatProgressLineLocked(event ghcli.ProgressEvent) string {
-	label := p.formatLeftTextLocked(event)
-	bar := p.renderBarLocked(event)
-	eta := padLeftVisible(p.formatETALocked(event), 7)
+func (p *progressReporter) renderLocked() {
+	msg := p.formatProgressLineLocked()
+	fmt.Fprintf(p.out, "\r%s\x1b[K", msg)
+}
+
+func (p *progressReporter) formatProgressLineLocked() string {
+	label := p.formatLeftTextLocked()
+	bar := p.renderBarLocked()
+	eta := padLeftVisible(p.formatETALocked(), 7)
 	right := fmt.Sprintf("%s %s", bar, eta)
 	width := p.lineWidthLocked()
 	if width <= 0 {
@@ -131,7 +227,27 @@ func (p *progressReporter) formatProgressLineLocked(event ghcli.ProgressEvent) s
 	return label + strings.Repeat(" ", padding) + right
 }
 
-func (p *progressReporter) formatLeftTextLocked(event ghcli.ProgressEvent) string {
+func (p *progressReporter) formatLeftTextLocked() string {
+	// Step-based progress (push)
+	if p.phase != "" || p.total > 0 {
+		phase := p.phase
+		if phase == "" {
+			phase = "Working"
+		}
+		if p.total > 0 {
+			percent := int(float64(p.completed) / float64(p.total) * 100)
+			if percent < 0 {
+				percent = 0
+			} else if percent > 100 {
+				percent = 100
+			}
+			return fmt.Sprintf("%s  %2d%%", p.theme.MutedText(phase), percent)
+		}
+		return p.theme.MutedText(phase)
+	}
+
+	// Event-based progress (pull)
+	event := p.lastEvent
 	if event.Total > 0 {
 		percent := int(float64(event.Issues) / float64(event.Total) * 100)
 		if percent < 0 {
@@ -156,7 +272,28 @@ func (p *progressReporter) formatLeftTextLocked(event ghcli.ProgressEvent) strin
 	return p.theme.MutedText("Fetching issues")
 }
 
-func (p *progressReporter) renderBarLocked(event ghcli.ProgressEvent) string {
+func (p *progressReporter) renderBarLocked() string {
+	// Step-based progress
+	if p.phase != "" || p.total > 0 {
+		if p.total <= 0 {
+			// Indeterminate
+			return p.renderIndeterminateBarLocked()
+		}
+		progress := float64(p.completed) / float64(p.total)
+		if progress < 0 {
+			progress = 0
+		} else if progress > 1 {
+			progress = 1
+		}
+		filled := int(progress * float64(progressBarWidth))
+		if filled > progressBarWidth {
+			filled = progressBarWidth
+		}
+		return p.renderDeterminateBarLocked(filled)
+	}
+
+	// Event-based progress
+	event := p.lastEvent
 	if event.Total <= 0 {
 		return p.renderIndeterminateBarLocked()
 	}
@@ -234,16 +371,28 @@ func (p *progressReporter) renderIndeterminateBarLocked() string {
 	return b.String()
 }
 
-func (p *progressReporter) formatETALocked(event ghcli.ProgressEvent) string {
+func (p *progressReporter) formatETALocked() string {
 	eta := "--:--"
-	if event.Total > 0 && event.Issues > 0 && !p.start.IsZero() {
+
+	var current, total int
+	if p.phase != "" || p.total > 0 {
+		// Step-based
+		current = p.completed
+		total = p.total
+	} else {
+		// Event-based
+		current = p.lastEvent.Issues
+		total = p.lastEvent.Total
+	}
+
+	if total > 0 && current > 0 && !p.start.IsZero() {
 		elapsed := time.Since(p.start).Seconds()
 		if elapsed > 0 {
-			remaining := event.Total - event.Issues
+			remaining := total - current
 			if remaining < 0 {
 				remaining = 0
 			}
-			rate := float64(event.Issues) / elapsed
+			rate := float64(current) / elapsed
 			if rate > 0 {
 				seconds := int(float64(remaining) / rate)
 				eta = formatDuration(seconds)
@@ -306,10 +455,7 @@ func (p *progressReporter) runPulse(stop <-chan struct{}, done chan<- struct{}) 
 				continue
 			}
 			p.advancePulseLocked()
-			event := p.lastEvent
-			msg := p.formatProgressLineLocked(event)
-			fmt.Fprintf(p.out, "\r%s\x1b[K", msg)
-			p.started = true
+			p.renderLocked()
 			p.mu.Unlock()
 		}
 	}

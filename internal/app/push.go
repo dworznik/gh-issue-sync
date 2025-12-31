@@ -141,77 +141,159 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 		}
 	}
 
-	// Create any missing labels
-	labelCacheUpdated := false
+	// Count missing labels and milestones
+	var missingLabels []string
 	for label := range neededLabels {
 		if _, exists := labelColors[strings.ToLower(label)]; !exists {
-			if opts.DryRun {
-				fmt.Fprintf(a.Out, "%s %s\n", t.MutedText("Would create label"), label)
-				continue
-			}
-			color := randomLabelColor()
-			if err := client.CreateLabel(ctx, label, color); err != nil {
-				fmt.Fprintf(a.Err, "%s creating label %q: %v\n", t.WarningText("Warning:"), label, err)
-				continue
-			}
-			fmt.Fprintf(a.Out, "%s %s\n", t.SuccessText("Created label"), label)
-			labelColors[strings.ToLower(label)] = color
-			labelCache.Labels = append(labelCache.Labels, LabelEntry{Name: label, Color: color})
-			labelCacheUpdated = true
+			missingLabels = append(missingLabels, label)
+		}
+	}
+	sort.Strings(missingLabels)
+
+	var missingMilestones []string
+	for milestone := range neededMilestones {
+		if _, exists := knownMilestones[strings.ToLower(milestone)]; !exists {
+			missingMilestones = append(missingMilestones, milestone)
+		}
+	}
+	sort.Strings(missingMilestones)
+
+	// Count new issues (T-numbered)
+	var newIssues []*IssueFile
+	for i := range filteredIssues {
+		if filteredIssues[i].Issue.Number.IsLocal() {
+			newIssues = append(newIssues, &filteredIssues[i])
 		}
 	}
 
-	// Create any missing milestones
-	milestoneCacheUpdated := false
-	for milestone := range neededMilestones {
-		if _, exists := knownMilestones[strings.ToLower(milestone)]; !exists {
-			if opts.DryRun {
-				fmt.Fprintf(a.Out, "%s %s\n", t.MutedText("Would create milestone"), milestone)
-				continue
+	// Count comments to post
+	var commentsToPost []PendingComment
+	if !opts.NoComments {
+		pendingComments := loadAllPendingComments(p)
+		if len(args) > 0 {
+			pushingNumbers := make(map[string]struct{})
+			for _, item := range filteredIssues {
+				pushingNumbers[item.Issue.Number.String()] = struct{}{}
 			}
-			if err := client.CreateMilestone(ctx, milestone); err != nil {
-				fmt.Fprintf(a.Err, "%s creating milestone %q: %v\n", t.WarningText("Warning:"), milestone, err)
-				continue
+			for _, comment := range pendingComments {
+				if _, ok := pushingNumbers[comment.IssueNumber.String()]; ok {
+					commentsToPost = append(commentsToPost, comment)
+				}
 			}
-			fmt.Fprintf(a.Out, "%s %s\n", t.SuccessText("Created milestone"), milestone)
-			knownMilestones[strings.ToLower(milestone)] = struct{}{}
-			milestoneCache.Milestones = append(milestoneCache.Milestones, MilestoneEntry{
-				Title: milestone,
-				State: "open",
-			})
-			milestoneCacheUpdated = true
+		} else {
+			for _, comment := range pendingComments {
+				commentsToPost = append(commentsToPost, comment)
+			}
 		}
+		sort.Slice(commentsToPost, func(i, j int) bool {
+			return commentsToPost[i].IssueNumber.String() < commentsToPost[j].IssueNumber.String()
+		})
+	}
+
+	// Handle dry-run: we need to check pending updates for dry-run output
+	if opts.DryRun {
+		for _, label := range missingLabels {
+			fmt.Fprintf(a.Out, "%s %s\n", t.MutedText("Would create label"), label)
+		}
+		for _, milestone := range missingMilestones {
+			fmt.Fprintf(a.Out, "%s %s\n", t.MutedText("Would create milestone"), milestone)
+		}
+		for _, item := range newIssues {
+			fmt.Fprintf(a.Out, "%s %s\n", t.MutedText("Would create issue"), item.Issue.Title)
+		}
+		unchanged := 0
+		for i := range filteredIssues {
+			item := &filteredIssues[i]
+			if item.Issue.Number.IsLocal() {
+				continue
+			}
+			original, hasOriginal := readOriginalIssue(p, item.Issue.Number.String())
+			localChanged := !hasOriginal || !issue.EqualIgnoringSyncedAt(item.Issue, original)
+			if !localChanged {
+				unchanged++
+				continue
+			}
+			fmt.Fprintf(a.Out, "%s %s\n", t.MutedText("Would push issue"), t.AccentText("#"+item.Issue.Number.String()))
+		}
+		for _, comment := range commentsToPost {
+			fmt.Fprintf(a.Out, "%s #%s\n", t.MutedText("Would post comment to"), comment.IssueNumber.String())
+		}
+		if unchanged > 0 {
+			noun := "issues"
+			if unchanged == 1 {
+				noun = "issue"
+			}
+			fmt.Fprintf(a.Out, "%s\n", t.MutedText(fmt.Sprintf("Nothing to push: %d %s up to date", unchanged, noun)))
+		}
+		return nil
+	}
+
+	// Start progress bar with initial count (labels + milestones + new issues + comments)
+	// We'll add pending updates after creating new issues
+	progress := newProgressReporter(a.Err, t)
+	progress.SetTotal(len(missingLabels) + len(missingMilestones) + len(newIssues) + len(commentsToPost))
+	progress.SetPhase("Preparing")
+	progress.Start()
+	defer progress.Done()
+
+	// Create missing labels
+	labelCacheUpdated := false
+	for _, label := range missingLabels {
+		color := randomLabelColor()
+		if err := client.CreateLabel(ctx, label, color); err != nil {
+			progress.Log(fmt.Sprintf("%s creating label %q: %v", t.WarningText("Warning:"), label, err))
+			progress.Advance()
+			continue
+		}
+		progress.Log(fmt.Sprintf("%s %s", t.SuccessText("Created label"), label))
+		labelColors[strings.ToLower(label)] = color
+		labelCache.Labels = append(labelCache.Labels, LabelEntry{Name: label, Color: color})
+		labelCacheUpdated = true
+		progress.Advance()
+	}
+
+	// Create missing milestones
+	milestoneCacheUpdated := false
+	for _, milestone := range missingMilestones {
+		if err := client.CreateMilestone(ctx, milestone); err != nil {
+			progress.Log(fmt.Sprintf("%s creating milestone %q: %v", t.WarningText("Warning:"), milestone, err))
+			progress.Advance()
+			continue
+		}
+		progress.Log(fmt.Sprintf("%s %s", t.SuccessText("Created milestone"), milestone))
+		knownMilestones[strings.ToLower(milestone)] = struct{}{}
+		milestoneCache.Milestones = append(milestoneCache.Milestones, MilestoneEntry{
+			Title: milestone,
+			State: "open",
+		})
+		milestoneCacheUpdated = true
+		progress.Advance()
 	}
 
 	// Save updated label cache
-	if labelCacheUpdated && !opts.DryRun {
+	if labelCacheUpdated {
 		labelCache.SyncedAt = a.Now().UTC()
 		if err := saveLabelCache(p, labelCache); err != nil {
-			fmt.Fprintf(a.Err, "%s saving label cache: %v\n", t.WarningText("Warning:"), err)
+			progress.Log(fmt.Sprintf("%s saving label cache: %v", t.WarningText("Warning:"), err))
 		}
 	}
 
 	// Save updated milestone cache
-	if milestoneCacheUpdated && !opts.DryRun {
+	if milestoneCacheUpdated {
 		milestoneCache.SyncedAt = a.Now().UTC()
 		if err := saveMilestoneCache(p, milestoneCache); err != nil {
-			fmt.Fprintf(a.Err, "%s saving milestone cache: %v\n", t.WarningText("Warning:"), err)
+			progress.Log(fmt.Sprintf("%s saving milestone cache: %v", t.WarningText("Warning:"), err))
 		}
 	}
 
+	// Create new issues
+	progress.SetPhase("Creating issues")
 	mapping := map[string]string{}
 	createdNumbers := map[string]struct{}{}
-	for i := range filteredIssues {
-		item := &filteredIssues[i]
-		if !item.Issue.Number.IsLocal() {
-			continue
-		}
-		if opts.DryRun {
-			fmt.Fprintf(a.Out, "%s %s\n", t.MutedText("Would create issue"), item.Issue.Title)
-			continue
-		}
+	for _, item := range newIssues {
 		newNumber, err := client.CreateIssue(ctx, item.Issue)
 		if err != nil {
+			progress.Done()
 			return err
 		}
 		oldNumber := item.Issue.Number.String()
@@ -222,35 +304,38 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 		newPath := issue.PathFor(dirForState(p, item.State), item.Issue.Number, item.Issue.Title)
 		if item.Path != newPath {
 			if err := os.Rename(item.Path, newPath); err != nil {
+				progress.Done()
 				return err
 			}
 			item.Path = newPath
 		}
 		if err := issue.WriteFile(item.Path, item.Issue); err != nil {
+			progress.Done()
 			return err
 		}
 		if err := writeOriginalIssue(p, item.Issue); err != nil {
+			progress.Done()
 			return err
 		}
-		fmt.Fprintln(a.Out, t.FormatIssueHeader("A", newNumber, item.Issue.Title))
+		progress.Log(t.FormatIssueHeader("A", newNumber, item.Issue.Title))
+		progress.Advance()
 	}
 
+	// Update references in all issues if we created new ones
 	if len(mapping) > 0 {
 		allIssues, err := loadLocalIssues(p)
 		if err != nil {
+			progress.Done()
 			return err
 		}
 		for i := range allIssues {
 			changed := applyMapping(&allIssues[i].Issue, mapping)
 			if changed {
-				if opts.DryRun {
-					fmt.Fprintf(a.Out, "%s %s\n", t.MutedText("Would update references in"), allIssues[i].Path)
-					continue
-				}
 				if err := issue.WriteFile(allIssues[i].Path, allIssues[i].Issue); err != nil {
+					progress.Done()
 					return err
 				}
-				fmt.Fprintf(a.Out, "%s %s\n", t.MutedText("Updated references in"), relPath(a.Root, allIssues[i].Path))
+				progress.Log(fmt.Sprintf("%s %s", t.MutedText("Updated references in"), relPath(a.Root, allIssues[i].Path)))
 			}
 		}
 		if len(args) > 0 {
@@ -262,52 +347,48 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 		}
 		filteredIssues, err = filterIssuesByArgs(a.Root, allIssues, args)
 		if err != nil {
+			progress.Done()
 			return err
 		}
 
-		// Sync relationships and issue type for newly created issues (now that T-numbers are resolved)
-		if !opts.DryRun {
-			for number := range createdNumbers {
-				// Find the issue in filteredIssues
-				for _, item := range filteredIssues {
-					if item.Issue.Number.String() == number {
-						if err := client.SyncRelationships(ctx, number, item.Issue); err != nil {
-							fmt.Fprintf(a.Err, "%s syncing relationships for #%s: %v\n",
-								t.WarningText("Warning:"), number, err)
-						}
-						// Set issue type if specified
-						if item.Issue.IssueType != "" {
-							if it, ok := knownIssueTypes[strings.ToLower(item.Issue.IssueType)]; ok {
-								if err := client.SetIssueType(ctx, number, it.ID); err != nil {
-									fmt.Fprintf(a.Err, "%s setting issue type for #%s: %v\n",
-										t.WarningText("Warning:"), number, err)
-								}
-							} else {
-								fmt.Fprintf(a.Err, "%s unknown issue type %q for #%s\n",
-									t.WarningText("Warning:"), item.Issue.IssueType, number)
-							}
-						}
-						// Add to projects if specified
-						if len(item.Issue.Projects) > 0 {
-							projectIDs := make(map[string]string)
-							for _, p := range knownProjects {
-								projectIDs[strings.ToLower(p.Title)] = p.ID
-							}
-							if err := client.SyncProjects(ctx, number, item.Issue.Projects, projectIDs); err != nil {
-								fmt.Fprintf(a.Err, "%s syncing projects for #%s: %v\n",
-									t.WarningText("Warning:"), number, err)
-							}
-						}
-						break
+		// Sync relationships and issue type for newly created issues
+		for number := range createdNumbers {
+			for _, item := range filteredIssues {
+				if item.Issue.Number.String() == number {
+					if err := client.SyncRelationships(ctx, number, item.Issue); err != nil {
+						progress.Log(fmt.Sprintf("%s syncing relationships for #%s: %v",
+							t.WarningText("Warning:"), number, err))
 					}
+					if item.Issue.IssueType != "" {
+						if it, ok := knownIssueTypes[strings.ToLower(item.Issue.IssueType)]; ok {
+							if err := client.SetIssueType(ctx, number, it.ID); err != nil {
+								progress.Log(fmt.Sprintf("%s setting issue type for #%s: %v",
+									t.WarningText("Warning:"), number, err))
+							}
+						} else {
+							progress.Log(fmt.Sprintf("%s unknown issue type %q for #%s",
+								t.WarningText("Warning:"), item.Issue.IssueType, number))
+						}
+					}
+					if len(item.Issue.Projects) > 0 {
+						projectIDs := make(map[string]string)
+						for _, proj := range knownProjects {
+							projectIDs[strings.ToLower(proj.Title)] = proj.ID
+						}
+						if err := client.SyncProjects(ctx, number, item.Issue.Projects, projectIDs); err != nil {
+							progress.Log(fmt.Sprintf("%s syncing projects for #%s: %v",
+								t.WarningText("Warning:"), number, err))
+						}
+					}
+					break
 				}
 			}
 		}
 	}
 
-	// Phase 1: Identify issues that need updating (local check only, no API calls)
+	// Now count issues that need updating (after reference mapping)
+	progress.SetPhase("Updating issues")
 	type pendingUpdate struct {
-		Index       int
 		Item        *IssueFile
 		Original    issue.Issue
 		HasOriginal bool
@@ -321,20 +402,17 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 		if item.Issue.Number.IsLocal() {
 			continue
 		}
+		// Skip issues we just created
+		if _, created := createdNumbers[item.Issue.Number.String()]; created {
+			continue
+		}
 		original, hasOriginal := readOriginalIssue(p, item.Issue.Number.String())
 		localChanged := !hasOriginal || !issue.EqualIgnoringSyncedAt(item.Issue, original)
 		if !localChanged {
-			if _, ok := createdNumbers[item.Issue.Number.String()]; !ok {
-				unchanged++
-			}
-			continue
-		}
-		if opts.DryRun {
-			fmt.Fprintf(a.Out, "%s %s\n", t.MutedText("Would push issue"), t.AccentText("#"+item.Issue.Number.String()))
+			unchanged++
 			continue
 		}
 		pendingUpdates = append(pendingUpdates, pendingUpdate{
-			Index:       i,
 			Item:        item,
 			Original:    original,
 			HasOriginal: hasOriginal,
@@ -342,36 +420,43 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 		issueNumbersToFetch = append(issueNumbersToFetch, item.Issue.Number.String())
 	}
 
-	// Phase 2: Batch fetch remote issues for conflict detection (one API call)
+	// Update progress total with pending updates count
+	progress.SetTotal(progress.Completed() + len(pendingUpdates) + len(commentsToPost))
+
+	// Batch fetch remote issues for conflict detection
 	var remoteIssues map[string]issue.Issue
 	if len(issueNumbersToFetch) > 0 {
 		var err error
 		remoteIssues, err = client.GetIssuesBatch(ctx, issueNumbersToFetch)
 		if err != nil {
+			progress.Done()
 			return fmt.Errorf("failed to fetch remote issues: %w", err)
 		}
 	}
 
-	// Phase 3: Detect conflicts and compute changes
+	// Detect conflicts and compute changes
 	var conflicts []string
 	var batchUpdates []ghcli.BatchIssueUpdate
 	type postBatchWork struct {
-		Item        *IssueFile
-		Original    issue.Issue
-		Change      ghcli.IssueChange
+		Item     *IssueFile
+		Original issue.Issue
+		Change   ghcli.IssueChange
 	}
 	var postBatchWorks []postBatchWork
 
+	conflictCount := 0
 	for _, pu := range pendingUpdates {
 		numStr := pu.Item.Issue.Number.String()
 		remote, ok := remoteIssues[numStr]
 		if !ok {
-			fmt.Fprintf(a.Err, "%s issue #%s not found on remote\n", t.WarningText("Warning:"), numStr)
+			progress.Log(fmt.Sprintf("%s issue #%s not found on remote", t.WarningText("Warning:"), numStr))
+			conflictCount++
 			continue
 		}
 
 		if pu.HasOriginal && !issue.EqualForConflictCheck(remote, pu.Original) {
 			conflicts = append(conflicts, numStr)
+			conflictCount++
 			continue
 		}
 
@@ -390,10 +475,12 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 					reason = *change.StateReason
 				}
 				if err := client.CloseIssue(ctx, numStr, reason); err != nil {
+					progress.Done()
 					return err
 				}
 			} else if *change.StateTransition == "reopen" {
 				if err := client.ReopenIssue(ctx, numStr); err != nil {
+					progress.Done()
 					return err
 				}
 			}
@@ -411,8 +498,6 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 			if change.Milestone != nil {
 				update.Milestone = change.Milestone
 			}
-			// For labels and assignees, we need the final set, not add/remove
-			// Use empty slice (not nil) to clear all labels/assignees
 			if len(change.AddLabels) > 0 || len(change.RemoveLabels) > 0 {
 				if pu.Item.Issue.Labels == nil {
 					update.Labels = []string{}
@@ -430,7 +515,6 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 			batchUpdates = append(batchUpdates, update)
 		}
 
-		// Queue post-batch work (issue type, relationships, projects)
 		postBatchWorks = append(postBatchWorks, postBatchWork{
 			Item:     pu.Item,
 			Original: pu.Original,
@@ -438,19 +522,19 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 		})
 	}
 
-	// Phase 4: Execute batch update (one API call for all basic edits)
+	// Execute batch update
 	if len(batchUpdates) > 0 {
 		result, err := client.BatchEditIssues(ctx, batchUpdates)
 		if err != nil {
+			progress.Done()
 			return fmt.Errorf("batch update failed: %w", err)
 		}
-		// Report any errors from the batch
 		for num, errMsg := range result.Errors {
-			fmt.Fprintf(a.Err, "%s updating #%s: %s\n", t.WarningText("Warning:"), num, errMsg)
+			progress.Log(fmt.Sprintf("%s updating #%s: %s", t.WarningText("Warning:"), num, errMsg))
 		}
 	}
 
-	// Phase 5: Handle post-batch work (issue type, relationships, projects) and finalize
+	// Handle post-batch work and finalize
 	for _, work := range postBatchWorks {
 		numStr := work.Item.Issue.Number.String()
 
@@ -461,22 +545,22 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 				if it, ok := knownIssueTypes[strings.ToLower(*work.Change.IssueType)]; ok {
 					issueTypeID = it.ID
 				} else {
-					fmt.Fprintf(a.Err, "%s unknown issue type %q for #%s\n",
-						t.WarningText("Warning:"), *work.Change.IssueType, numStr)
+					progress.Log(fmt.Sprintf("%s unknown issue type %q for #%s",
+						t.WarningText("Warning:"), *work.Change.IssueType, numStr))
 				}
 			}
 			if issueTypeID != "" || *work.Change.IssueType == "" {
 				if err := client.SetIssueType(ctx, numStr, issueTypeID); err != nil {
-					fmt.Fprintf(a.Err, "%s setting issue type for #%s: %v\n",
-						t.WarningText("Warning:"), numStr, err)
+					progress.Log(fmt.Sprintf("%s setting issue type for #%s: %v",
+						t.WarningText("Warning:"), numStr, err))
 				}
 			}
 		}
 
 		// Sync parent and blocking relationships via GraphQL
 		if err := client.SyncRelationships(ctx, numStr, work.Item.Issue); err != nil {
-			fmt.Fprintf(a.Err, "%s syncing relationships for #%s: %v\n",
-				t.WarningText("Warning:"), numStr, err)
+			progress.Log(fmt.Sprintf("%s syncing relationships for #%s: %v",
+				t.WarningText("Warning:"), numStr, err))
 		}
 
 		// Sync projects via GraphQL (if changed)
@@ -486,24 +570,77 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 				projectIDs[strings.ToLower(proj.Title)] = proj.ID
 			}
 			if err := client.SyncProjects(ctx, numStr, work.Item.Issue.Projects, projectIDs); err != nil {
-				fmt.Fprintf(a.Err, "%s syncing projects for #%s: %v\n",
-					t.WarningText("Warning:"), numStr, err)
+				progress.Log(fmt.Sprintf("%s syncing projects for #%s: %v",
+					t.WarningText("Warning:"), numStr, err))
 			}
 		}
 
 		work.Item.Issue.SyncedAt = ptrTime(a.Now().UTC())
 		if err := issue.WriteFile(work.Item.Path, work.Item.Issue); err != nil {
+			progress.Done()
 			return err
 		}
 		if err := writeOriginalIssue(p, work.Item.Issue); err != nil {
+			progress.Done()
 			return err
 		}
-		fmt.Fprintln(a.Out, t.FormatIssueHeader("U", numStr, work.Item.Issue.Title))
+		progress.Log(t.FormatIssueHeader("U", numStr, work.Item.Issue.Title))
 		for _, line := range a.formatChangeLines(work.Original, work.Item.Issue, labelColors) {
-			fmt.Fprintln(a.Out, line)
+			progress.Log(line)
 		}
+		progress.Advance()
 	}
 
+	// Advance for conflicts (they were counted but not processed)
+	for i := 0; i < conflictCount; i++ {
+		progress.Advance()
+	}
+
+	// Post comments
+	progress.SetPhase("Posting comments")
+	conflictSet := make(map[string]struct{})
+	for _, num := range conflicts {
+		conflictSet[num] = struct{}{}
+	}
+
+	for _, comment := range commentsToPost {
+		numStr := comment.IssueNumber.String()
+
+		// Skip local issues (can't post comments to issues that don't exist yet)
+		if comment.IssueNumber.IsLocal() {
+			if realNum, ok := mapping[numStr]; ok {
+				comment.IssueNumber = issue.IssueNumber(realNum)
+				numStr = realNum
+			} else {
+				progress.Advance()
+				continue
+			}
+		}
+
+		// Skip issues that had conflicts
+		if _, isConflict := conflictSet[numStr]; isConflict {
+			progress.Advance()
+			continue
+		}
+
+		if err := client.CreateComment(ctx, numStr, comment.Body); err != nil {
+			progress.Log(fmt.Sprintf("%s posting comment to #%s: %v", t.WarningText("Warning:"), numStr, err))
+			progress.Advance()
+			continue
+		}
+
+		if err := deletePendingComment(comment); err != nil {
+			progress.Log(fmt.Sprintf("%s removing comment file %s: %v", t.WarningText("Warning:"), relPath(a.Root, comment.Path), err))
+		}
+
+		progress.Log(fmt.Sprintf("%s #%s", t.SuccessText("Posted comment to"), numStr))
+		progress.Advance()
+	}
+
+	// Done with progress bar
+	progress.Done()
+
+	// Print final messages
 	if len(conflicts) > 0 {
 		sort.Strings(conflicts)
 		fmt.Fprintf(a.Err, "%s %s\n", t.WarningText("Conflicts (remote changed, skipped):"), strings.Join(conflicts, ", "))
@@ -514,78 +651,6 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 			noun = "issue"
 		}
 		fmt.Fprintf(a.Out, "%s\n", t.MutedText(fmt.Sprintf("Nothing to push: %d %s up to date", unchanged, noun)))
-	}
-
-	// Handle pending comments (unless --no-comments)
-	if !opts.NoComments {
-		pendingComments := loadAllPendingComments(p)
-
-		// Filter comments to only those for issues we're pushing (if args specified)
-		var commentsToPost []PendingComment
-		if len(args) > 0 {
-			// Build set of issue numbers we're pushing
-			pushingNumbers := make(map[string]struct{})
-			for _, item := range filteredIssues {
-				pushingNumbers[item.Issue.Number.String()] = struct{}{}
-			}
-			for _, comment := range pendingComments {
-				if _, ok := pushingNumbers[comment.IssueNumber.String()]; ok {
-					commentsToPost = append(commentsToPost, comment)
-				}
-			}
-		} else {
-			for _, comment := range pendingComments {
-				commentsToPost = append(commentsToPost, comment)
-			}
-		}
-
-		// Sort by issue number for consistent output
-		sort.Slice(commentsToPost, func(i, j int) bool {
-			return commentsToPost[i].IssueNumber.String() < commentsToPost[j].IssueNumber.String()
-		})
-
-		// Skip comments for issues that had conflicts
-		conflictSet := make(map[string]struct{})
-		for _, num := range conflicts {
-			conflictSet[num] = struct{}{}
-		}
-
-		for _, comment := range commentsToPost {
-			numStr := comment.IssueNumber.String()
-
-			// Skip local issues (can't post comments to issues that don't exist yet)
-			if comment.IssueNumber.IsLocal() {
-				// Check if it was mapped to a real number
-				if realNum, ok := mapping[numStr]; ok {
-					comment.IssueNumber = issue.IssueNumber(realNum)
-					numStr = realNum
-				} else {
-					continue
-				}
-			}
-
-			// Skip issues that had conflicts
-			if _, isConflict := conflictSet[numStr]; isConflict {
-				continue
-			}
-
-			if opts.DryRun {
-				fmt.Fprintf(a.Out, "%s #%s\n", t.MutedText("Would post comment to"), numStr)
-				continue
-			}
-
-			if err := client.CreateComment(ctx, numStr, comment.Body); err != nil {
-				fmt.Fprintf(a.Err, "%s posting comment to #%s: %v\n", t.WarningText("Warning:"), numStr, err)
-				continue
-			}
-
-			// Delete the comment file on success
-			if err := deletePendingComment(comment); err != nil {
-				fmt.Fprintf(a.Err, "%s removing comment file %s: %v\n", t.WarningText("Warning:"), relPath(a.Root, comment.Path), err)
-			}
-
-			fmt.Fprintf(a.Out, "%s #%s\n", t.SuccessText("Posted comment to"), numStr)
-		}
 	}
 
 	return nil
