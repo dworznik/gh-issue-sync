@@ -38,8 +38,13 @@ create new issues locally, and push changes back to GitHub when ready.
 
 Prerequisites:
 
-- [Go 1.21+](https://go.dev/dl/)
 - [GitHub CLI (`gh`)](https://cli.github.com/) installed and authenticated (`gh auth login`)
+
+### Quick Install (macOS/Linux)
+
+```bash
+curl -sSfL https://github.com/mitsuhiko/gh-issue-sync/releases/latest/download/install.sh | sh
+```
 
 ### Install with Go
 
@@ -47,22 +52,17 @@ Prerequisites:
 go install github.com/mitsuhiko/gh-issue-sync/cmd/gh-issue-sync@latest
 ```
 
-This installs the binary to `$GOBIN` (or `$GOPATH/bin`). Make sure it is in your `PATH`.
+### Download Binary
 
-### Build from source
+Download the latest binary from [GitHub Releases](https://github.com/mitsuhiko/gh-issue-sync/releases/latest) and place it in your PATH.
+
+### Build from Source
 
 ```bash
 git clone https://github.com/mitsuhiko/gh-issue-sync.git
 cd gh-issue-sync
 go build -o gh-issue-sync ./cmd/gh-issue-sync
-```
-
-Optionally move the binary to your PATH:
-
-```bash
 mv gh-issue-sync ~/.local/bin/
-# or
-sudo mv gh-issue-sync /usr/local/bin/
 ```
 
 ## Quickstart
