@@ -182,28 +182,22 @@ gh-issue-sync sync --label bug
 
 ## Sync Behavior
 
-This is how issues are synced:
+The tool uses three-way comparison (local, original, remote) to detect conflicts.
+Original versions are stored in `.issues/.sync/originals/`.
 
-### On Pull
+| Local | Original | Remote | Action |
+|-------|----------|--------|--------|
+| Same | Same | Same | No action |
+| Changed | Same | Same | Push local changes |
+| Same | Same | Changed | Pull remote changes |
+| Changed | Same | Changed | **Conflict** - skip with warning |
 
-- New issues are saved to `open/` or `closed/` based on state
-- Existing issues are updated only if unchanged locally
-- Local changes are preserved; conflicts are reported but not overwritten
-- Deleted local files are restored from GitHub (if originals exist)
-- Use `--force` to overwrite local changes
+**On pull:** New issues are saved, unchanged local files are updated, conflicts
+are skipped (use `--force` to overwrite). Deleted local files are restored.
 
-### On Push
-
-- Local issues (T1, T2, etc.) are created on GitHub
-- After creation, files are renamed with real issue numbers
-- References like `#T1` in other issues are automatically updated
-- Missing labels and milestones are created automatically
-- Changed issues are pushed; conflicts with remote changes are skipped
-
-### Conflict Detection
-
-Original versions are stored in `.issues/.sync/originals/` to enable
-three-way merge conflict detection between local, original, and remote.
+**On push:** Local issues (T1, T2, etc.) are created and renamed with real numbers.
+References like `#T1` are updated automatically. Missing labels and milestones
+are created. Conflicts with remote changes are skipped.
 
 ### List Issues
 
@@ -277,97 +271,16 @@ Alternatively, move files manually:
 - Move from `open/` to `closed/` to close
 - Move from `closed/` to `open/` to reopen
 
-### Pending Comments
-
-You can queue a comment to be posted when pushing an issue. Create a file named
-`{number}.comment.md` in the same directory as the issue:
-
-```bash
-# Create a pending comment for issue #42
-echo "Updated the acceptance criteria based on PM feedback." > .issues/open/42.comment.md
-
-# The comment will be posted on push
-gh-issue-sync push
-```
-
-The comment file is automatically deleted after successfully posting. This is
-useful for agents or batch workflows that want to leave notes when updating issues.
-
-To skip posting comments during push:
-
-```bash
-gh-issue-sync push --no-comments
-```
-
 ## Issue File Format
 
-Each issue is a Markdown file with YAML front matter:
+See [Issue Format](ISSUE_FORMAT.md) for details on file structure, front matter
+fields, and pending comments.
 
-```markdown
----
-number: 123
-title: Fix login bug on mobile Safari
-labels:
-  - bug
-  - ios
-assignees:
-  - alice
-  - bob
-milestone: v2.0
-type: Bug
-state: open
-state_reason:
-synced_at: 2025-12-29T17:00:00Z
----
+## License and Links
 
-The body of the issue goes here!
-```
-
-### Front Matter Fields
-
-| Field | Type | Description | Editable |
-|-------|------|-------------|----------|
-| `number` | int/string | Issue number or local ID (T1, T2) | No (managed) |
-| `title` | string | Issue title | Yes |
-| `labels` | string[] | Label names | Yes |
-| `assignees` | string[] | GitHub usernames | Yes |
-| `milestone` | string | Milestone name | Yes |
-| `type` | string | Issue type (org repos only) | Yes |
-| `projects` | string[] | Project names | Yes |
-| `state` | string | `open` or `closed` | Via folder |
-| `state_reason` | string | `completed` or `not_planned` | Yes |
-| `parent` | int | Parent issue number | Yes |
-| `blocked_by` | int[] | Blocking issue numbers | Yes |
-| `blocks` | int[] | Issues this blocks | Yes |
-| `synced_at` | datetime | Last sync time | No (managed) |
-
-### File Naming
-
-Files are named `{number}-{slug}.md` where slug is derived from the title:
-- `123-fix-login-bug.md`
-- `T1-new-feature.md`
-
-The slug is for readability only, the tool identifies issues by the number prefix.
-
-## Conflict Handling
-
-`gh-issue-sync` uses three-way comparison to detect conflicts:
-
-| Local | Original | Remote | Action |
-|-------|----------|--------|--------|
-| Same | Same | Same | No action |
-| Changed | Same | Same | Push local changes |
-| Same | Same | Changed | Pull remote changes |
-| Changed | Same | Changed | **Conflict** – skip with warning |
-
-When a conflict occurs:
-- On **pull**: local changes are preserved, remote update is skipped
-- On **push**: remote changes are detected, local push is skipped
-- Use `--force` on pull to overwrite local changes
-
-## License
+- [Skill File](skill/SKILL.md)
+- [Issue Tracker](https://github.com/mitsuhiko/gh-issue-sync/issues)
+- License: [Apache-2.0](https://github.com/mitsuhiko/gh-issue-sync/blob/main/LICENSE)
 
 This code is entirely LLM generated. It is unclear if LLM generated code
 can be copyrighted.
-
-- License: [Apache-2.0](https://github.com/mitsuhiko/gh-issue-sync/blob/main/LICENSE)
