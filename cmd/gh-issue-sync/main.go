@@ -58,6 +58,7 @@ type PushCommand struct {
 	BaseCommand
 	DryRun     bool `long:"dry-run" description:"Show what would happen without pushing"`
 	NoComments bool `long:"no-comments" description:"Skip posting pending comments"`
+	Force      bool `long:"force" description:"Skip conflict detection and push anyway"`
 	Args       struct {
 		Issues []string `positional-arg-name:"issue" description:"Issue numbers, local IDs, or paths to push"`
 	} `positional-args:"yes"`
@@ -207,7 +208,7 @@ func (c *PullCommand) Execute(args []string) error {
 }
 
 func (c *PushCommand) Execute(args []string) error {
-	opts := app.PushOptions{DryRun: c.DryRun, NoComments: c.NoComments}
+	opts := app.PushOptions{DryRun: c.DryRun, NoComments: c.NoComments, Force: c.Force}
 	if len(c.Args.Issues) > 0 {
 		return c.App.Push(context.Background(), opts, c.Args.Issues)
 	}

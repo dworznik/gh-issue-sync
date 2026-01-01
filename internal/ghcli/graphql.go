@@ -88,6 +88,34 @@ func (c *Client) GetIssueRelationshipsBatch(ctx context.Context, numbers []strin
 		return map[string]IssueRelationships{}, nil
 	}
 
+	// Process in chunks to avoid GitHub's resource limits
+	results := make(map[string]IssueRelationships)
+	for i := 0; i < len(numbers); i += batchChunkSize {
+		end := i + batchChunkSize
+		if end > len(numbers) {
+			end = len(numbers)
+		}
+		chunk := numbers[i:end]
+
+		chunkResults, err := c.getIssueRelationshipsBatchChunk(ctx, chunk)
+		if err != nil {
+			return nil, err
+		}
+
+		for k, v := range chunkResults {
+			results[k] = v
+		}
+	}
+
+	return results, nil
+}
+
+// getIssueRelationshipsBatchChunk fetches relationships for a single chunk of issues.
+func (c *Client) getIssueRelationshipsBatchChunk(ctx context.Context, numbers []string) (map[string]IssueRelationships, error) {
+	if len(numbers) == 0 {
+		return map[string]IssueRelationships{}, nil
+	}
+
 	owner, repo := splitRepo(c.repo)
 	if owner == "" || repo == "" {
 		return nil, fmt.Errorf("invalid repository format")
@@ -596,11 +624,47 @@ type BatchUpdateResult struct {
 	Errors  map[string]string // Issue number -> error message
 }
 
+// batchChunkSize is the maximum number of issues to update in a single GraphQL call.
+// GitHub's GraphQL API has resource limits that prevent very large mutations.
+const batchChunkSize = 20
+
 // BatchEditIssues updates multiple issues in a single GraphQL call.
 // This is much faster than calling EditIssue for each issue individually.
 // Note: This only handles title, body, milestone, labels, and assignees.
 // State changes, relationships, issue types, and projects must be handled separately.
 func (c *Client) BatchEditIssues(ctx context.Context, updates []BatchIssueUpdate) (BatchUpdateResult, error) {
+	result := BatchUpdateResult{
+		Errors: make(map[string]string),
+	}
+
+	if len(updates) == 0 {
+		return result, nil
+	}
+
+	// Process updates in chunks to avoid GitHub's resource limits
+	for i := 0; i < len(updates); i += batchChunkSize {
+		end := i + batchChunkSize
+		if end > len(updates) {
+			end = len(updates)
+		}
+		chunk := updates[i:end]
+
+		chunkResult, err := c.batchEditIssuesChunk(ctx, chunk)
+		if err != nil {
+			return result, err
+		}
+
+		result.Updated = append(result.Updated, chunkResult.Updated...)
+		for k, v := range chunkResult.Errors {
+			result.Errors[k] = v
+		}
+	}
+
+	return result, nil
+}
+
+// batchEditIssuesChunk processes a single chunk of batch updates.
+func (c *Client) batchEditIssuesChunk(ctx context.Context, updates []BatchIssueUpdate) (BatchUpdateResult, error) {
 	result := BatchUpdateResult{
 		Errors: make(map[string]string),
 	}

@@ -454,9 +454,23 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 			continue
 		}
 
-		if pu.HasOriginal && !issue.EqualForConflictCheck(remote, pu.Original) {
-			conflicts = append(conflicts, numStr)
-			conflictCount++
+		if !opts.Force && pu.HasOriginal && !issue.EqualForConflictCheck(remote, pu.Original) {
+			// Remote changed since last sync, but check if local matches remote
+			// (i.e., the same change was already applied - no real conflict)
+			if !issue.EqualForConflictCheck(remote, pu.Item.Issue) {
+				conflicts = append(conflicts, numStr)
+				conflictCount++
+				continue
+			}
+			// Local matches remote - update the original and skip (nothing to push)
+			if err := writeOriginalIssue(p, remote); err != nil {
+				progress.Log(fmt.Sprintf("%s updating original for #%s: %v", t.WarningText("Warning:"), numStr, err))
+			}
+			pu.Item.Issue.SyncedAt = ptrTime(a.Now().UTC())
+			if err := issue.WriteFile(pu.Item.Path, pu.Item.Issue); err != nil {
+				progress.Log(fmt.Sprintf("%s updating local file for #%s: %v", t.WarningText("Warning:"), numStr, err))
+			}
+			unchanged++
 			continue
 		}
 

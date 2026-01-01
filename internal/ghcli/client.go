@@ -550,9 +550,40 @@ func (c *Client) GetIssue(ctx context.Context, number string) (issue.Issue, erro
 	return payload.ToIssue(), nil
 }
 
+// batchQueryChunkSize is the maximum number of issues to query in a single GraphQL call.
+const batchQueryChunkSize = 20
+
 // GetIssuesBatch fetches multiple issues in a single GraphQL call.
 // Returns a map of issue number -> issue. Issues that don't exist are not included.
 func (c *Client) GetIssuesBatch(ctx context.Context, numbers []string) (map[string]issue.Issue, error) {
+	if len(numbers) == 0 {
+		return map[string]issue.Issue{}, nil
+	}
+
+	// Process in chunks to avoid GitHub's resource limits
+	results := make(map[string]issue.Issue)
+	for i := 0; i < len(numbers); i += batchQueryChunkSize {
+		end := i + batchQueryChunkSize
+		if end > len(numbers) {
+			end = len(numbers)
+		}
+		chunk := numbers[i:end]
+
+		chunkResults, err := c.getIssuesBatchChunk(ctx, chunk)
+		if err != nil {
+			return nil, err
+		}
+
+		for k, v := range chunkResults {
+			results[k] = v
+		}
+	}
+
+	return results, nil
+}
+
+// getIssuesBatchChunk fetches a single chunk of issues.
+func (c *Client) getIssuesBatchChunk(ctx context.Context, numbers []string) (map[string]issue.Issue, error) {
 	if len(numbers) == 0 {
 		return map[string]issue.Issue{}, nil
 	}

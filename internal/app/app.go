@@ -33,6 +33,7 @@ type PullOptions struct {
 type PushOptions struct {
 	DryRun     bool
 	NoComments bool
+	Force      bool
 }
 
 type NewOptions struct {
