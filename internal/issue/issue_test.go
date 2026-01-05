@@ -151,3 +151,150 @@ func TestInfoSectionOmittedWhenEmpty(t *testing.T) {
 		t.Fatalf("rendered should not contain info section when empty: %s", rendered)
 	}
 }
+
+func TestComputeChanges(t *testing.T) {
+	base := Issue{
+		Title:     "Original title",
+		Labels:    []string{"bug"},
+		Assignees: []string{"alice"},
+		State:     "open",
+		Body:      "Original body",
+	}
+
+	changed := Issue{
+		Title:     "New title",
+		Labels:    []string{"bug", "urgent"},
+		Assignees: []string{"alice"},
+		State:     "open",
+		Body:      "Original body",
+	}
+
+	changes := ComputeChanges(base, changed)
+
+	if !changes.Title {
+		t.Error("expected Title to be changed")
+	}
+	if !changes.Labels {
+		t.Error("expected Labels to be changed")
+	}
+	if changes.Assignees {
+		t.Error("expected Assignees to NOT be changed")
+	}
+	if changes.Body {
+		t.Error("expected Body to NOT be changed")
+	}
+}
+
+func TestThreeWayMerge_NoConflict(t *testing.T) {
+	base := Issue{
+		Title:  "Original title",
+		Labels: []string{"bug"},
+		State:  "open",
+		Body:   "Original body",
+	}
+
+	// Local changed the title
+	local := Issue{
+		Title:  "New title",
+		Labels: []string{"bug"},
+		State:  "open",
+		Body:   "Original body",
+	}
+
+	// Remote changed labels
+	remote := Issue{
+		Title:  "Original title",
+		Labels: []string{"bug", "urgent"},
+		State:  "open",
+		Body:   "Original body",
+	}
+
+	result := ThreeWayMerge(base, local, remote)
+
+	if !result.OK {
+		t.Fatalf("expected merge to succeed, got conflicts: %v", result.ConflictingFields.Fields())
+	}
+
+	if result.Merged.Title != "New title" {
+		t.Errorf("expected merged title to be 'New title', got %q", result.Merged.Title)
+	}
+	if len(result.Merged.Labels) != 2 || result.Merged.Labels[0] != "bug" || result.Merged.Labels[1] != "urgent" {
+		t.Errorf("expected merged labels to be [bug, urgent], got %v", result.Merged.Labels)
+	}
+}
+
+func TestThreeWayMerge_Conflict(t *testing.T) {
+	base := Issue{
+		Title:  "Original title",
+		Labels: []string{"bug"},
+		State:  "open",
+		Body:   "Original body",
+	}
+
+	// Local changed the title
+	local := Issue{
+		Title:  "Local title",
+		Labels: []string{"bug"},
+		State:  "open",
+		Body:   "Original body",
+	}
+
+	// Remote also changed the title
+	remote := Issue{
+		Title:  "Remote title",
+		Labels: []string{"bug"},
+		State:  "open",
+		Body:   "Original body",
+	}
+
+	result := ThreeWayMerge(base, local, remote)
+
+	if result.OK {
+		t.Fatal("expected merge to fail due to title conflict")
+	}
+
+	if !result.ConflictingFields.Title {
+		t.Error("expected Title to be in conflicting fields")
+	}
+	if len(result.ConflictingFields.Fields()) != 1 {
+		t.Errorf("expected only 1 conflicting field, got %v", result.ConflictingFields.Fields())
+	}
+}
+
+func TestThreeWayMerge_NoLocalChanges(t *testing.T) {
+	base := Issue{
+		Title:  "Original title",
+		Labels: []string{"bug"},
+		State:  "open",
+		Body:   "Original body",
+	}
+
+	// Local is same as base
+	local := Issue{
+		Title:  "Original title",
+		Labels: []string{"bug"},
+		State:  "open",
+		Body:   "Original body",
+	}
+
+	// Remote changed labels
+	remote := Issue{
+		Title:  "Original title",
+		Labels: []string{"bug", "urgent"},
+		State:  "open",
+		Body:   "Original body",
+	}
+
+	result := ThreeWayMerge(base, local, remote)
+
+	if !result.OK {
+		t.Fatalf("expected merge to succeed")
+	}
+	if !result.LocalChanges.IsEmpty() {
+		t.Errorf("expected no local changes, got %v", result.LocalChanges.Fields())
+	}
+	// Merged should match remote
+	if len(result.Merged.Labels) != 2 {
+		t.Errorf("expected merged to have remote labels, got %v", result.Merged.Labels)
+	}
+}

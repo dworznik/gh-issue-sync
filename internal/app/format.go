@@ -269,3 +269,15 @@ func getTerminalWidth(w io.Writer) int {
 	}
 	return width - 1 // Reserve last column to avoid wrapping
 }
+
+// formatConflictLines formats the differences between local and remote for conflicting fields.
+// It reuses formatChangeLines but shows local->remote instead of old->new.
+func (a *App) formatConflictLines(local, remote issue.Issue, fields []string, labelColors map[string]string) []string {
+	// formatChangeLines shows old->new diff, which is what we want for local->remote
+	lines := a.formatChangeLines(local, remote, labelColors)
+	// Indent the lines a bit more for conflict display
+	for i, line := range lines {
+		lines[i] = "  " + line
+	}
+	return lines
+}

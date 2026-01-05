@@ -435,7 +435,13 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 	}
 
 	// Detect conflicts and compute changes
-	var conflicts []string
+	type conflictInfo struct {
+		Number string
+		Fields []string
+		Local  issue.Issue
+		Remote issue.Issue
+	}
+	var conflicts []conflictInfo
 	var batchUpdates []ghcli.BatchIssueUpdate
 	type postBatchWork struct {
 		Item     *IssueFile
@@ -443,6 +449,7 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 		Change   ghcli.IssueChange
 	}
 	var postBatchWorks []postBatchWork
+	var autoMerged []string
 
 	conflictCount := 0
 	for _, pu := range pendingUpdates {
@@ -455,23 +462,38 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 		}
 
 		if !opts.Force && pu.HasOriginal && !issue.EqualForConflictCheck(remote, pu.Original) {
-			// Remote changed since last sync, but check if local matches remote
-			// (i.e., the same change was already applied - no real conflict)
-			if !issue.EqualForConflictCheck(remote, pu.Item.Issue) {
-				conflicts = append(conflicts, numStr)
+			// Remote changed since last sync - try three-way merge
+			mergeResult := issue.ThreeWayMerge(pu.Original, pu.Item.Issue, remote)
+
+			if !mergeResult.OK {
+				// Real conflict - fields overlap
+				conflicts = append(conflicts, conflictInfo{
+					Number: numStr,
+					Fields: mergeResult.ConflictingFields.Fields(),
+					Local:  pu.Item.Issue,
+					Remote: remote,
+				})
 				conflictCount++
 				continue
 			}
-			// Local matches remote - update the original and skip (nothing to push)
-			if err := writeOriginalIssue(p, remote); err != nil {
-				progress.Log(fmt.Sprintf("%s updating original for #%s: %v", t.WarningText("Warning:"), numStr, err))
+
+			if mergeResult.LocalChanges.IsEmpty() {
+				// No local changes - just update original to match remote
+				if err := writeOriginalIssue(p, remote); err != nil {
+					progress.Log(fmt.Sprintf("%s updating original for #%s: %v", t.WarningText("Warning:"), numStr, err))
+				}
+				// Update local file with remote changes
+				remote.SyncedAt = ptrTime(a.Now().UTC())
+				if err := issue.WriteFile(pu.Item.Path, remote); err != nil {
+					progress.Log(fmt.Sprintf("%s updating local file for #%s: %v", t.WarningText("Warning:"), numStr, err))
+				}
+				unchanged++
+				continue
 			}
-			pu.Item.Issue.SyncedAt = ptrTime(a.Now().UTC())
-			if err := issue.WriteFile(pu.Item.Path, pu.Item.Issue); err != nil {
-				progress.Log(fmt.Sprintf("%s updating local file for #%s: %v", t.WarningText("Warning:"), numStr, err))
-			}
-			unchanged++
-			continue
+
+			// Auto-merge succeeded - use merged issue
+			pu.Item.Issue = mergeResult.Merged
+			autoMerged = append(autoMerged, numStr)
 		}
 
 		// Use remote as baseline if no original exists (for state transitions)
@@ -613,8 +635,8 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 	// Post comments
 	progress.SetPhase("Posting comments")
 	conflictSet := make(map[string]struct{})
-	for _, num := range conflicts {
-		conflictSet[num] = struct{}{}
+	for _, c := range conflicts {
+		conflictSet[c.Number] = struct{}{}
 	}
 
 	for _, comment := range commentsToPost {
@@ -655,9 +677,29 @@ func (a *App) Push(ctx context.Context, opts PushOptions, args []string) error {
 	progress.Done()
 
 	// Print final messages
+	if len(autoMerged) > 0 {
+		sort.Strings(autoMerged)
+		fmt.Fprintf(a.Out, "%s %s\n", t.SuccessText("Auto-merged (no conflicts):"), strings.Join(autoMerged, ", "))
+	}
 	if len(conflicts) > 0 {
-		sort.Strings(conflicts)
-		fmt.Fprintf(a.Err, "%s %s\n", t.WarningText("Conflicts (remote changed, skipped):"), strings.Join(conflicts, ", "))
+		sort.Slice(conflicts, func(i, j int) bool {
+			return conflicts[i].Number < conflicts[j].Number
+		})
+		fmt.Fprintf(a.Err, "%s\n", t.WarningText("Conflicts (remote changed, skipped):"))
+		for _, c := range conflicts {
+			fmt.Fprintf(a.Err, "  %s %s\n", t.AccentText("#"+c.Number), t.MutedText("("+strings.Join(c.Fields, ", ")+")"))
+			for _, line := range a.formatConflictLines(c.Local, c.Remote, c.Fields, labelColors) {
+				fmt.Fprintf(a.Err, "%s\n", line)
+			}
+			// Show body diff if body is conflicting
+			for _, f := range c.Fields {
+				if f == "body" {
+					fmt.Fprintf(a.Err, "      %s\n", t.MutedText("local -> remote:"))
+					a.printWordDiff(c.Local.Body, c.Remote.Body)
+					break
+				}
+			}
+		}
 	}
 	if unchanged > 0 {
 		noun := "issues"

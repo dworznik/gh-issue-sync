@@ -429,3 +429,175 @@ var osReadFile = func(path string) ([]byte, error) {
 var osWriteFile = func(path string, data []byte, perm os.FileMode) error {
 	return os.WriteFile(path, data, perm)
 }
+
+// FieldSet tracks which fields have been modified.
+type FieldSet struct {
+	Title     bool
+	Labels    bool
+	Assignees bool
+	Milestone bool
+	IssueType bool
+	Projects  bool
+	State     bool
+	Parent    bool
+	BlockedBy bool
+	Blocks    bool
+	Body      bool
+}
+
+// Fields returns a list of field names that are set.
+func (f FieldSet) Fields() []string {
+	var fields []string
+	if f.Title {
+		fields = append(fields, "title")
+	}
+	if f.Labels {
+		fields = append(fields, "labels")
+	}
+	if f.Assignees {
+		fields = append(fields, "assignees")
+	}
+	if f.Milestone {
+		fields = append(fields, "milestone")
+	}
+	if f.IssueType {
+		fields = append(fields, "issue_type")
+	}
+	if f.Projects {
+		fields = append(fields, "projects")
+	}
+	if f.State {
+		fields = append(fields, "state")
+	}
+	if f.Parent {
+		fields = append(fields, "parent")
+	}
+	if f.BlockedBy {
+		fields = append(fields, "blocked_by")
+	}
+	if f.Blocks {
+		fields = append(fields, "blocks")
+	}
+	if f.Body {
+		fields = append(fields, "body")
+	}
+	return fields
+}
+
+// IsEmpty returns true if no fields are set.
+func (f FieldSet) IsEmpty() bool {
+	return !f.Title && !f.Labels && !f.Assignees && !f.Milestone &&
+		!f.IssueType && !f.Projects && !f.State && !f.Parent &&
+		!f.BlockedBy && !f.Blocks && !f.Body
+}
+
+// Overlaps returns a FieldSet containing fields that are set in both.
+func (f FieldSet) Overlaps(other FieldSet) FieldSet {
+	return FieldSet{
+		Title:     f.Title && other.Title,
+		Labels:    f.Labels && other.Labels,
+		Assignees: f.Assignees && other.Assignees,
+		Milestone: f.Milestone && other.Milestone,
+		IssueType: f.IssueType && other.IssueType,
+		Projects:  f.Projects && other.Projects,
+		State:     f.State && other.State,
+		Parent:    f.Parent && other.Parent,
+		BlockedBy: f.BlockedBy && other.BlockedBy,
+		Blocks:    f.Blocks && other.Blocks,
+		Body:      f.Body && other.Body,
+	}
+}
+
+// ComputeChanges returns which fields differ between base and changed.
+func ComputeChanges(base, changed Issue) FieldSet {
+	base = Normalize(base)
+	changed = Normalize(changed)
+
+	return FieldSet{
+		Title:     base.Title != changed.Title,
+		Labels:    !stringSlicesEqual(base.Labels, changed.Labels),
+		Assignees: !stringSlicesEqual(base.Assignees, changed.Assignees),
+		Milestone: base.Milestone != changed.Milestone,
+		IssueType: base.IssueType != changed.IssueType,
+		Projects:  !stringSlicesEqual(base.Projects, changed.Projects),
+		State:     base.State != changed.State,
+		Parent:    normalizeOptionalRef(base.Parent) != normalizeOptionalRef(changed.Parent),
+		BlockedBy: !refSlicesEqual(base.BlockedBy, changed.BlockedBy),
+		Blocks:    !refSlicesEqual(base.Blocks, changed.Blocks),
+		Body:      base.Body != changed.Body,
+	}
+}
+
+// MergeResult represents the outcome of a three-way merge.
+type MergeResult struct {
+	// Merged contains the merged issue (only valid if OK is true).
+	Merged Issue
+	// OK is true if the merge succeeded without conflicts.
+	OK bool
+	// ConflictingFields lists the fields that conflict (only if OK is false).
+	ConflictingFields FieldSet
+	// LocalChanges lists fields changed locally.
+	LocalChanges FieldSet
+	// RemoteChanges lists fields changed remotely.
+	RemoteChanges FieldSet
+}
+
+// ThreeWayMerge attempts to merge local and remote changes against a common base.
+// If changes don't overlap, it returns a merged issue. Otherwise, it returns
+// information about which fields conflict.
+func ThreeWayMerge(base, local, remote Issue) MergeResult {
+	localChanges := ComputeChanges(base, local)
+	remoteChanges := ComputeChanges(base, remote)
+	conflicts := localChanges.Overlaps(remoteChanges)
+
+	result := MergeResult{
+		LocalChanges:  localChanges,
+		RemoteChanges: remoteChanges,
+	}
+
+	if !conflicts.IsEmpty() {
+		result.ConflictingFields = conflicts
+		return result
+	}
+
+	// No conflicts - merge by starting with remote and applying local changes
+	merged := Normalize(remote)
+
+	if localChanges.Title {
+		merged.Title = local.Title
+	}
+	if localChanges.Labels {
+		merged.Labels = local.Labels
+	}
+	if localChanges.Assignees {
+		merged.Assignees = local.Assignees
+	}
+	if localChanges.Milestone {
+		merged.Milestone = local.Milestone
+	}
+	if localChanges.IssueType {
+		merged.IssueType = local.IssueType
+	}
+	if localChanges.Projects {
+		merged.Projects = local.Projects
+	}
+	if localChanges.State {
+		merged.State = local.State
+	}
+	if localChanges.Parent {
+		merged.Parent = local.Parent
+	}
+	if localChanges.BlockedBy {
+		merged.BlockedBy = local.BlockedBy
+	}
+	if localChanges.Blocks {
+		merged.Blocks = local.Blocks
+	}
+	if localChanges.Body {
+		merged.Body = local.Body
+	}
+
+	result.Merged = merged
+	result.OK = true
+	return result
+}

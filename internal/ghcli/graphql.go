@@ -594,17 +594,6 @@ func splitRepo(repo string) (string, string) {
 	return parts[0], parts[1]
 }
 
-// EscapeGraphQLString escapes a string for use in a GraphQL query.
-// This handles newlines, quotes, and backslashes.
-func EscapeGraphQLString(s string) string {
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	s = strings.ReplaceAll(s, "\"", "\\\"")
-	s = strings.ReplaceAll(s, "\n", "\\n")
-	s = strings.ReplaceAll(s, "\r", "\\r")
-	s = strings.ReplaceAll(s, "\t", "\\t")
-	return s
-}
-
 // BatchIssueUpdate represents updates to apply to a single issue.
 type BatchIssueUpdate struct {
 	Number         string   // Issue number
@@ -719,7 +708,9 @@ func (c *Client) batchEditIssuesChunk(ctx context.Context, updates []BatchIssueU
 			inputParts = append(inputParts, fmt.Sprintf("title: %q", *u.Title))
 		}
 		if u.Body != nil {
-			inputParts = append(inputParts, fmt.Sprintf("body: %q", EscapeGraphQLString(*u.Body)))
+			// Use %q directly - it handles escaping correctly for GraphQL strings.
+			// Don't use EscapeGraphQLString here as %q already escapes newlines, quotes, etc.
+			inputParts = append(inputParts, fmt.Sprintf("body: %q", *u.Body))
 		}
 
 		// Handle milestone
